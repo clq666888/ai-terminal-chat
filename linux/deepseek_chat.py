@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
 import sys
+import os
 import readline
 import requests
 
 # ==================== 配置区（可直接修改） ====================
-API_KEY = "你的 API Key"
-BASE_URL = "https://api.deepseek.com/v1/chat/completions"
+# -- API 访问设置 --
+BASE_URL = "https://api.deepseek.com/v1/chat/completions"   # 接口地址
+KEY_FILE_PATH = "/home/sti/apikey.txt"                      # API Key 文件路径（建议用绝对路径）
 
-# 模型选择（取消注释你想用的那一行）
+# -- 模型选择（取消注释你想用的那一行） --
 # MODEL = "deepseek-chat"
 # MODEL = "deepseek-v4-pro"
 MODEL = "deepseek-v4-flash"
 
-# 外部系统提示词文件路径（留空则使用默认提示词）
-SYSTEM_PROMPT_FILE = "/home/clq/api脚本调用/提示词/.txt"   # 例如: "/home/clq/prompts/assistant.txt"
-
-# 默认系统提示词（未指定外部文件时生效）
-DEFAULT_SYSTEM_PROMPT = "你是 DeepSeek，一个聪明的 AI 助手。"
+# -- 系统提示词 --
+SYSTEM_PROMPT_FILE = "/home/sti/ai调用脚本/提示词/无限制.txt"  # 外部提示词文件（留空则使用默认）
+DEFAULT_SYSTEM_PROMPT = "你是 DeepSeek，一个聪明的 AI 助手。"  # 默认提示词（无外部文件时生效）
 # =============================================================
+
+# 从文件读取 API Key
+try:
+    with open(KEY_FILE_PATH, "r", encoding="utf-8") as f:
+        API_KEY = f.read().strip()
+    if not API_KEY:
+        raise ValueError("apikey.txt 内容为空")
+except Exception as e:
+    print(f"❌ 无法读取 API Key，请检查 {KEY_FILE_PATH} 文件: {e}")
+    sys.exit(1)
 
 history = []
 
@@ -44,7 +54,6 @@ def chat(user_input):
     payload = {
         "model": MODEL,
         "messages": history,
-        # "max_tokens": 1024,
         "temperature": 0.7
     }
 
@@ -63,7 +72,7 @@ def chat(user_input):
 if __name__ == "__main__":
     # 确定系统提示词
     system_content = DEFAULT_SYSTEM_PROMPT
-    prompt_source = None   # 保存提示词来源（文件名或None）
+    prompt_source = None
     if SYSTEM_PROMPT_FILE:
         loaded_prompt = load_system_prompt(SYSTEM_PROMPT_FILE)
         if loaded_prompt:
