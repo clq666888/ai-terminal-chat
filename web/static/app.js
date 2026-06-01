@@ -1,6 +1,7 @@
 const chatArea = document.getElementById("chat-area");
 const userInput = document.getElementById("user-input");
 const btnSend = document.getElementById("btn-send");
+const btnStop = document.getElementById("btn-stop");
 const btnClear = document.getElementById("btn-clear");
 const btnNewChat = document.getElementById("btn-new-chat");
 const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
@@ -13,14 +14,12 @@ const settingsOverlay = document.getElementById("settings-overlay");
 const btnCloseSettings = document.getElementById("btn-close-settings");
 const btnSaveSettings = document.getElementById("btn-save-settings");
 
-const setProvider = document.getElementById("set-provider");
+const setMaxRounds = document.getElementById("set-max-rounds");
+const setMaxContextSize = document.getElementById("set-max-context-size");
 const setBaseUrl = document.getElementById("set-base-url");
-const setModel = document.getElementById("set-model");
-const setModelCustom = document.getElementById("set-model-custom");
 const setApiKey = document.getElementById("set-api-key");
 const setKeyFile = document.getElementById("set-key-file");
 const keyStatus = document.getElementById("key-status");
-const setMaxRounds = document.getElementById("set-max-rounds");
 const quickModel = document.getElementById("quick-model");
 
 const btnManageModels = document.getElementById("btn-manage-models");
@@ -30,7 +29,7 @@ const customModelListEl = document.getElementById("custom-model-list");
 const addProvider = document.getElementById("add-provider");
 const addModel = document.getElementById("add-model");
 const addModelCustom = document.getElementById("add-model-custom");
-const btnAddModel = document.getElementById("btn-add-model");
+const btnSaveApiConfig = document.getElementById("btn-save-api-config");
 
 const agentSelector = document.getElementById("agent-selector");
 const agentSelectorBtn = document.getElementById("agent-selector-btn");
@@ -55,8 +54,18 @@ const agentProvider = document.getElementById("agent-provider");
 const agentModel = document.getElementById("agent-model");
 const btnAgentCancel = document.getElementById("btn-agent-cancel");
 const btnAgentSave = document.getElementById("btn-agent-save");
+const agentFormActions = document.getElementById("agent-form-actions");
+const agentCallable = document.getElementById("agent-callable");
+const callableFields = document.getElementById("callable-fields");
+const agentSlug = document.getElementById("agent-slug");
+const agentWhenToCall = document.getElementById("agent-when-to-call");
+
+const btnAttach = document.getElementById("btn-attach");
+const imageFileInput = document.getElementById("image-file-input");
+const imagePreviewBar = document.getElementById("image-preview-bar");
 
 let isGenerating = false;
+let currentAbort = null;
 let currentConvId = null;
 let welcomeHTML = welcome ? welcome.outerHTML : "";
 let providers = {};
@@ -64,6 +73,19 @@ let currentAgentId = null;
 let editingAgentId = null;
 let agentAvatarUrl = "";
 let cachedAgents = [];
+let pendingImages = [];
+let pendingDocs = [];
+
+function renderMarkdown(text) {
+    if (typeof marked !== "undefined") {
+        try {
+            return marked.parse(text);
+        } catch (e) {
+            return escapeHtml(text).replace(/\n/g, "<br>");
+        }
+    }
+    return escapeHtml(text).replace(/\n/g, "<br>");
+}
 
 const DEFAULT_AVATAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>';
 const SMALL_AVATAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>';
@@ -74,6 +96,7 @@ const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 btnToggleSidebar.addEventListener("click", () => sidebar.classList.toggle("collapsed"));
 btnNewChat.addEventListener("click", createNewConversation);
 btnSend.addEventListener("click", sendMessage);
+btnStop.addEventListener("click", stopGeneration);
 btnClear.addEventListener("click", clearCurrentConversation);
 userInput.addEventListener("input", autoResize);
 userInput.addEventListener("keydown", e => {
@@ -84,11 +107,6 @@ btnSettings.addEventListener("click", openSettings);
 btnCloseSettings.addEventListener("click", closeSettings);
 settingsOverlay.addEventListener("click", e => { if (e.target === settingsOverlay) closeSettings(); });
 btnSaveSettings.addEventListener("click", saveSettings);
-setProvider.addEventListener("change", onProviderChange);
-setModel.addEventListener("change", () => {
-    if (setModel.value === "__custom__") { setModelCustom.style.display = "block"; setModelCustom.focus(); }
-    else { setModelCustom.style.display = "none"; }
-});
 
 quickModel.addEventListener("change", onQuickModelChange);
 btnManageModels.addEventListener("click", openManageModels);
@@ -99,7 +117,7 @@ addModel.addEventListener("change", () => {
     if (addModel.value === "__custom__") { addModelCustom.style.display = "block"; addModelCustom.focus(); }
     else { addModelCustom.style.display = "none"; }
 });
-btnAddModel.addEventListener("click", addCustomModel);
+btnSaveApiConfig.addEventListener("click", saveApiConfig);
 
 agentSelectorBtn.addEventListener("click", toggleAgentDropdown);
 agentDropdownManage.addEventListener("click", () => { closeAgentDropdown(); openAgentPanel(); });
@@ -113,6 +131,193 @@ btnCreateAgent.addEventListener("click", () => showAgentForm(null));
 btnAgentCancel.addEventListener("click", showAgentList);
 btnAgentSave.addEventListener("click", saveAgent);
 agentAvatarInput.addEventListener("change", uploadAvatar);
+agentCallable.addEventListener("change", () => {
+    callableFields.style.display = agentCallable.checked ? "block" : "none";
+});
+
+btnAttach.addEventListener("click", () => imageFileInput.click());
+imageFileInput.addEventListener("change", handleImageSelect);
+userInput.addEventListener("paste", handleImagePaste);
+
+const DOC_EXTENSIONS = new Set([
+    "pdf","doc","docx","xls","xlsx","ppt","pptx","csv","txt","md","log",
+    "json","xml","html","py","js","ts","java","c","cpp","go","rs","sh",
+    "yaml","yml","ini","conf","cfg","toml","rtf","odt","ods","odp"
+]);
+
+let dragCounter = 0;
+document.addEventListener("dragenter", e => {
+    e.preventDefault();
+    dragCounter++;
+    chatArea.classList.add("drag-over");
+});
+document.addEventListener("dragover", e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+});
+document.addEventListener("dragleave", e => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) {
+        dragCounter = 0;
+        chatArea.classList.remove("drag-over");
+    }
+});
+document.addEventListener("drop", e => {
+    e.preventDefault();
+    dragCounter = 0;
+    chatArea.classList.remove("drag-over");
+    const files = e.dataTransfer.files;
+    if (!files || !files.length) return;
+    for (const file of files) {
+        if (!checkFileAllowed(file)) continue;
+        if (file.type.startsWith("image/")) {
+            readImageFile(file);
+        } else {
+            uploadDocFile(file);
+        }
+    }
+});
+
+function handleImageSelect() {
+    const files = imageFileInput.files;
+    if (!files || !files.length) return;
+    for (const file of files) {
+        if (!checkFileAllowed(file)) continue;
+        if (file.type.startsWith("image/")) {
+            readImageFile(file);
+        } else {
+            uploadDocFile(file);
+        }
+    }
+    imageFileInput.value = "";
+}
+
+function checkFileAllowed(file) {
+    const ext = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
+    if (file.type.startsWith("image/")) return true;
+    if (DOC_EXTENSIONS.has(ext)) return true;
+    showToast("不支持的文件格式: ." + ext + "\n支持: 图片、PDF、Word、Excel、PPT、CSV、TXT、代码文件等", "error");
+    return false;
+}
+
+async function uploadDocFile(file) {
+    if (file.size > 50 * 1024 * 1024) {
+        showToast("文档不能超过 50MB", "error");
+        return;
+    }
+    const placeholder = { name: file.name, text: null, loading: true, charCount: 0, truncated: false };
+    pendingDocs.push(placeholder);
+    renderPreviews();
+    try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const resp = await fetch("/api/upload-doc", { method: "POST", body: formData });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.error || "文档上传失败", "error");
+            pendingDocs.splice(pendingDocs.indexOf(placeholder), 1);
+            renderPreviews();
+            return;
+        }
+        const data = await resp.json();
+        placeholder.text = data.text;
+        placeholder.loading = false;
+        placeholder.charCount = data.char_count;
+        placeholder.truncated = data.truncated;
+        renderPreviews();
+    } catch (e) {
+        showToast("文档上传失败: " + e.message, "error");
+        pendingDocs.splice(pendingDocs.indexOf(placeholder), 1);
+        renderPreviews();
+    }
+}
+
+function handleImagePaste(e) {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+        if (item.type.startsWith("image/")) {
+            e.preventDefault();
+            readImageFile(item.getAsFile());
+        }
+    }
+}
+
+function readImageFile(file) {
+    if (file.size > 20 * 1024 * 1024) {
+        showToast("图片不能超过 20MB", "error");
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+        pendingImages.push({ name: file.name, base64: reader.result });
+        renderPreviews();
+    };
+    reader.readAsDataURL(file);
+}
+
+function renderPreviews() {
+    imagePreviewBar.innerHTML = "";
+    if (pendingImages.length === 0 && pendingDocs.length === 0) {
+        imagePreviewBar.style.display = "none";
+        return;
+    }
+    imagePreviewBar.style.display = "flex";
+    pendingImages.forEach((img, idx) => {
+        const item = document.createElement("div");
+        item.className = "image-preview-item";
+        const thumb = document.createElement("img");
+        thumb.src = img.base64;
+        thumb.alt = img.name;
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "image-preview-remove";
+        removeBtn.textContent = "\u00d7";
+        removeBtn.addEventListener("click", () => {
+            pendingImages.splice(idx, 1);
+            renderPreviews();
+        });
+        item.appendChild(thumb);
+        item.appendChild(removeBtn);
+        imagePreviewBar.appendChild(item);
+    });
+    pendingDocs.forEach((doc, idx) => {
+        const item = document.createElement("div");
+        item.className = "doc-preview-item";
+        const icon = document.createElement("span");
+        icon.className = "doc-preview-icon";
+        const ext = doc.name.includes(".") ? doc.name.split(".").pop().toLowerCase() : "";
+        icon.textContent = ext === "pdf" ? "\ud83d\udcc4" : ext === "xlsx" ? "\ud83d\udcca" : ext === "docx" ? "\ud83d\udcdd" : ext === "csv" ? "\ud83d\udcca" : "\ud83d\udcc3";
+        const info = document.createElement("div");
+        info.className = "doc-preview-info";
+        const nameEl = document.createElement("div");
+        nameEl.className = "doc-preview-name";
+        nameEl.textContent = doc.name;
+        info.appendChild(nameEl);
+        if (doc.loading) {
+            const status = document.createElement("div");
+            status.className = "doc-preview-status";
+            status.textContent = "解析中...";
+            info.appendChild(status);
+        } else {
+            const status = document.createElement("div");
+            status.className = "doc-preview-status";
+            status.textContent = doc.charCount.toLocaleString() + " 字符" + (doc.truncated ? " (已截断)" : "");
+            info.appendChild(status);
+        }
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "doc-preview-remove";
+        removeBtn.textContent = "\u00d7";
+        removeBtn.addEventListener("click", () => {
+            pendingDocs.splice(idx, 1);
+            renderPreviews();
+        });
+        item.appendChild(icon);
+        item.appendChild(info);
+        item.appendChild(removeBtn);
+        imagePreviewBar.appendChild(item);
+    });
+}
 
 function autoResize() {
     userInput.style.height = "auto";
@@ -242,6 +447,7 @@ function closeAgentPanel() {
 async function showAgentList() {
     agentListView.style.display = "block";
     agentFormView.style.display = "none";
+    agentFormActions.style.display = "none";
     agentPanelTitle.textContent = "管理智能体";
 
     const resp = await fetch("/api/agents");
@@ -260,8 +466,9 @@ async function showAgentList() {
             ? '<div class="agent-card-avatar"><img src="' + a.avatar + '" alt=""></div>'
             : '<div class="agent-card-avatar">' + CARD_AVATAR_SVG + '</div>';
         const modelText = a.model ? a.model : "全局模型";
+        const callableBadge = a.callable ? '<span class="callable-badge" title="可被调用: ' + escapeHtml(a.slug || '') + '">⚡</span>' : '';
         card.innerHTML = avatarHTML +
-            '<div class="agent-card-name">' + escapeHtml(a.name) + '</div>' +
+            '<div class="agent-card-name">' + escapeHtml(a.name) + callableBadge + '</div>' +
             '<div class="agent-card-model">' + escapeHtml(modelText) + '</div>' +
             '<div class="agent-card-actions">' +
             '<button class="btn-edit-agent" title="编辑">✎</button>' +
@@ -291,6 +498,7 @@ async function showAgentList() {
 async function showAgentForm(agent) {
     agentListView.style.display = "none";
     agentFormView.style.display = "block";
+    agentFormActions.style.display = "flex";
     editingAgentId = agent ? agent.id : null;
     agentPanelTitle.textContent = agent ? "编辑智能体" : "创建智能体";
 
@@ -316,6 +524,11 @@ async function showAgentForm(agent) {
     if (agent && agent.model) {
         agentModel.value = agent.model;
     }
+
+    agentCallable.checked = agent ? !!agent.callable : false;
+    callableFields.style.display = agentCallable.checked ? "block" : "none";
+    agentSlug.value = agent ? (agent.slug || "") : "";
+    agentWhenToCall.value = agent ? (agent.when_to_call || "") : "";
 
     agentProvider.onchange = onAgentProviderChange;
 }
@@ -361,13 +574,22 @@ async function saveAgent() {
     const name = agentName.value.trim();
     if (!name) { showToast("请输入名称", "error"); return; }
 
+    const callable = agentCallable.checked;
+    const slug = agentSlug.value.trim();
+    const whenToCall = agentWhenToCall.value.trim();
+    if (callable && !slug) { showToast("请填写英文标识名", "error"); return; }
+    if (callable && !whenToCall) { showToast("请填写何时调用", "error"); return; }
+
     const payload = {
         name: name,
         avatar: agentAvatarUrl,
         system_prompt: agentPrompt.value,
         provider: agentProvider.value,
         model: agentModel.value,
-        base_url: ""
+        base_url: "",
+        callable: callable,
+        slug: slug,
+        when_to_call: whenToCall
     };
 
     if (payload.provider) {
@@ -416,23 +638,24 @@ async function buildQuickModelList() {
 
     quickModel.innerHTML = "";
     const activeKey = active.provider + "|" + active.model;
-    const seen = new Set();
 
-    const activeOpt = document.createElement("option");
-    activeOpt.value = activeKey;
-    activeOpt.textContent = active.model || "未配置";
-    activeOpt.selected = true;
-    quickModel.appendChild(activeOpt);
-    seen.add(activeKey);
+    if (customModels.length === 0) {
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "点击 + 添加模型";
+        placeholder.disabled = true;
+        placeholder.selected = true;
+        quickModel.appendChild(placeholder);
+        return;
+    }
 
     customModels.forEach(m => {
         const key = m.provider + "|" + m.model;
-        if (seen.has(key)) return;
-        seen.add(key);
         const opt = document.createElement("option");
         opt.value = key;
         opt.dataset.baseUrl = m.base_url || "";
         opt.textContent = m.name || m.model;
+        if (key === activeKey) opt.selected = true;
         quickModel.appendChild(opt);
     });
 }
@@ -466,7 +689,20 @@ async function openManageModels() {
         opt.textContent = val.name;
         addProvider.appendChild(opt);
     }
+    const resp = await fetch("/api/settings");
+    const cfg = resp.ok ? await resp.json() : {};
+    addProvider.value = cfg.provider || "deepseek";
     onAddProviderChange();
+    setBaseUrl.value = cfg.base_url || "";
+    setApiKey.value = "";
+    setKeyFile.value = cfg.key_file_path || "";
+    if (cfg.model) {
+        if (addModel.querySelector('option[value="' + cfg.model + '"]')) {
+            addModel.value = cfg.model;
+        }
+    }
+    keyStatus.textContent = cfg.has_api_key ? "✓ 已配置 API Key" : "✗ 未配置 API Key";
+    keyStatus.className = "key-status " + (cfg.has_api_key ? "ok" : "no");
     await renderCustomModelList();
     modelManageOverlay.classList.add("active");
 }
@@ -477,6 +713,7 @@ function onAddProviderChange() {
     const key = addProvider.value;
     const p = providers[key];
     if (!p) return;
+    if (p.base_url) setBaseUrl.value = p.base_url;
     addModel.innerHTML = "";
     if (p.models && p.models.length > 0) {
         p.models.forEach(m => {
@@ -503,7 +740,7 @@ async function renderCustomModelList() {
     const active = activeResp.ok ? await activeResp.json() : {};
     customModelListEl.innerHTML = "";
     if (customModels.length === 0) {
-        customModelListEl.innerHTML = '<div class="empty-hint">还没有添加模型，使用下方选择器添加</div>';
+        customModelListEl.innerHTML = '<div class="empty-hint">还没有保存任何模型配置</div>';
         return;
     }
     customModels.forEach(m => {
@@ -513,13 +750,35 @@ async function renderCustomModelList() {
         item.innerHTML =
             '<span class="model-name">' + escapeHtml(m.model) + '</span>' +
             '<span class="model-provider">' + escapeHtml(m.name || m.provider) + '</span>' +
-            '<button class="btn-remove-model" title="移除">✕</button>';
+            '<div class="model-item-actions">' +
+            '<button class="btn-edit-model" title="编辑">✎</button>' +
+            '<button class="btn-remove-model" title="删除">✕</button>' +
+            '</div>';
+        item.querySelector(".btn-edit-model").addEventListener("click", () => {
+            addProvider.value = m.provider;
+            onAddProviderChange();
+            setBaseUrl.value = m.base_url || "";
+            if (addModel.querySelector('option[value="' + m.model + '"]')) {
+                addModel.value = m.model;
+                addModelCustom.style.display = "none";
+            } else {
+                addModel.value = "__custom__";
+                addModelCustom.value = m.model;
+                addModelCustom.style.display = "block";
+            }
+            btnSaveApiConfig.dataset.editingKey = m.provider + "|" + m.model;
+            btnSaveApiConfig.textContent = "保存修改";
+        });
         item.querySelector(".btn-remove-model").addEventListener("click", async () => {
             await fetch("/api/custom-models", {
                 method: "DELETE",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ provider: m.provider, model: m.model })
             });
+            if (btnSaveApiConfig.dataset.editingKey === m.provider + "|" + m.model) {
+                btnSaveApiConfig.dataset.editingKey = "";
+                btnSaveApiConfig.textContent = "保存配置";
+            }
             await renderCustomModelList();
             await buildQuickModelList();
         });
@@ -527,31 +786,61 @@ async function renderCustomModelList() {
     });
 }
 
-async function addCustomModel() {
+
+async function saveApiConfig() {
     const provider = addProvider.value;
     const model = addModel.value === "__custom__" ? addModelCustom.value.trim() : addModel.value;
+    const base_url = setBaseUrl.value.trim();
+    if (!base_url) { showToast("请填写 API 地址", "error"); return; }
     if (!model) { showToast("请选择或输入模型名称", "error"); return; }
-    const p = providers[provider];
-    const base_url = p ? p.base_url : "";
-    const name = (p ? p.name : provider) + " / " + model;
+    const payload = { provider, base_url, model };
+    const apiKeyVal = setApiKey.value.trim();
+    const keyFileVal = setKeyFile.value.trim();
+    if (apiKeyVal) payload.api_key = apiKeyVal;
+    if (keyFileVal) payload.key_file_path = keyFileVal;
     try {
-        const resp = await fetch("/api/custom-models", {
-            method: "POST",
+        const settingsResp = await fetch("/api/settings", {
+            method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ provider, model, base_url, name })
+            body: JSON.stringify(payload)
         });
-        if (resp.ok) {
-            showToast("已添加 " + model, "success");
-            await renderCustomModelList();
-            await buildQuickModelList();
-        } else {
-            const err = await resp.json();
-            showToast(err.error || "添加失败", "error");
+        if (!settingsResp.ok) {
+            const err = await settingsResp.json();
+            showToast(err.error || "保存失败", "error");
+            return;
         }
+        const p = providers[provider];
+        const name = (p ? p.name : provider) + " / " + model;
+        const editingKey = btnSaveApiConfig.dataset.editingKey || "";
+        if (editingKey) {
+            const [oldProvider, oldModel] = editingKey.split("|", 2);
+            await fetch("/api/custom-models", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ old_provider: oldProvider, old_model: oldModel, provider, model, base_url, name })
+            });
+            btnSaveApiConfig.dataset.editingKey = "";
+            btnSaveApiConfig.textContent = "保存配置";
+        } else {
+            await fetch("/api/custom-models", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ provider, model, base_url, name })
+            });
+        }
+        showToast("配置已保存", "success");
+        if (apiKeyVal || keyFileVal) {
+            keyStatus.textContent = "✓ 已配置 API Key";
+            keyStatus.className = "key-status ok";
+        }
+        await renderCustomModelList();
+        await buildQuickModelList();
     } catch (err) {
-        showToast("添加失败", "error");
+        showToast("保存失败: " + err.message, "error");
     }
 }
+
+
 
 // ==================== 对话管理 ====================
 async function loadConversations() {
@@ -597,7 +886,7 @@ async function createNewConversation() {
 }
 
 async function switchConversation(cid) {
-    if (isGenerating) return;
+    if (isGenerating) stopGeneration();
     currentConvId = cid;
     document.querySelectorAll(".conv-item").forEach(el => {
         el.classList.toggle("active", el.dataset.id === cid);
@@ -606,7 +895,34 @@ async function switchConversation(cid) {
     const msgs = await resp.json();
     chatArea.innerHTML = "";
     if (msgs.length === 0) { showWelcome(); }
-    else { msgs.forEach(m => addMessage(m.role === "user" ? "user" : "ai", m.content)); }
+    else {
+        msgs.forEach(m => {
+            const role = m.role === "user" ? "user" : "ai";
+            let text = typeof m.content === "string" ? m.content : (m.content.find(c => c.type === "text") || {}).text || "";
+            const imgs = typeof m.content !== "string" ? m.content.filter(c => c.type === "image_url").map(c => c.image_url.url) : [];
+            let historyDocs = [];
+            if (role === "user") {
+                const docRegex = /\[文档: (.+?)\]\n[\s\S]*?(?=\n\n\[文档:|$)/g;
+                let dm;
+                while ((dm = docRegex.exec(text)) !== null) {
+                    historyDocs.push({ name: dm[1] });
+                }
+                if (historyDocs.length > 0) {
+                    const lastDoc = text.lastIndexOf("\n\n[文档:");
+                    const firstDoc = text.indexOf("[文档:");
+                    if (firstDoc === 0) {
+                        const afterDocs = text.replace(/^(\[文档: .+?\]\n[\s\S]*?)(\n\n(?!\[文档:)[\s\S]*)?$/, "$2").replace(/^\n\n/, "");
+                        text = afterDocs || "";
+                    }
+                }
+            }
+            addMessage(role, text, imgs, historyDocs);
+        });
+        const allMsgs = chatArea.querySelectorAll(".message.ai");
+        if (allMsgs.length > 0) {
+            appendRetryButton(allMsgs[allMsgs.length - 1], "", false);
+        }
+    }
 
     const convResp = await fetch("/api/conversations");
     const list = await convResp.json();
@@ -631,7 +947,8 @@ async function deleteConversation(cid) {
 }
 
 async function clearCurrentConversation() {
-    if (!currentConvId || isGenerating) return;
+    if (!currentConvId) return;
+    if (isGenerating) stopGeneration();
     await fetch("/api/conversations/" + currentConvId + "/clear", { method: "POST" });
     chatArea.innerHTML = "";
     showWelcome();
@@ -641,7 +958,7 @@ function showWelcome() { chatArea.innerHTML = welcomeHTML; }
 function hideWelcome() { const w = chatArea.querySelector(".welcome"); if (w) w.remove(); }
 
 // ==================== 消息渲染与发送 ====================
-function addMessage(role, content) {
+function addMessage(role, content, images, docs) {
     hideWelcome();
     const div = document.createElement("div");
     div.className = "message " + role;
@@ -650,12 +967,60 @@ function addMessage(role, content) {
     avatar.textContent = role === "user" ? "U" : "AI";
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    bubble.textContent = content;
+    if (role === "ai") {
+        const rendered = renderCallBlocks(content);
+        if (rendered) {
+            bubble.appendChild(rendered);
+        } else {
+            bubble.innerHTML = renderMarkdown(content);
+        }
+    } else {
+        if (docs && docs.length > 0) {
+            const docRow = document.createElement("div");
+            docRow.className = "msg-docs";
+            docs.forEach(d => {
+                const chip = document.createElement("span");
+                chip.className = "msg-doc-chip";
+                const ext = d.name.includes(".") ? d.name.split(".").pop().toLowerCase() : "";
+                const icon = ext === "pdf" ? "\ud83d\udcc4" : ext === "xlsx" ? "\ud83d\udcca" : ext === "docx" ? "\ud83d\udcdd" : ext === "csv" ? "\ud83d\udcca" : "\ud83d\udcc3";
+                chip.textContent = icon + " " + d.name;
+                docRow.appendChild(chip);
+            });
+            bubble.appendChild(docRow);
+        }
+        if (images && images.length > 0) {
+            const imgRow = document.createElement("div");
+            imgRow.className = "msg-images";
+            images.forEach(img => {
+                const src = typeof img === "string" ? img : img.base64;
+                const el = document.createElement("img");
+                el.src = src;
+                el.addEventListener("click", () => openImageViewer(src));
+                imgRow.appendChild(el);
+            });
+            bubble.appendChild(imgRow);
+        }
+        if (content) {
+            const textNode = document.createElement("div");
+            textNode.textContent = content;
+            bubble.appendChild(textNode);
+        }
+    }
     div.appendChild(avatar);
     div.appendChild(bubble);
     chatArea.appendChild(div);
     chatArea.scrollTop = chatArea.scrollHeight;
     return bubble;
+}
+
+function openImageViewer(src) {
+    const overlay = document.createElement("div");
+    overlay.className = "image-viewer-overlay";
+    const img = document.createElement("img");
+    img.src = src;
+    overlay.appendChild(img);
+    overlay.addEventListener("click", () => overlay.remove());
+    document.body.appendChild(overlay);
 }
 
 function addAiBubble() {
@@ -666,7 +1031,7 @@ function addAiBubble() {
     avatar.className = "avatar";
     avatar.textContent = "AI";
     const bubble = document.createElement("div");
-    bubble.className = "bubble";
+    bubble.className = "bubble streaming";
     const cursor = document.createElement("span");
     cursor.className = "typing-cursor";
     bubble.appendChild(cursor);
@@ -677,29 +1042,143 @@ function addAiBubble() {
     return { bubble, cursor };
 }
 
+
+async function retryLastMessage(userText, rolledBack) {
+    if (isGenerating || !currentConvId) return;
+    if (rolledBack) {
+        const messages = chatArea.querySelectorAll(".message");
+        if (messages.length >= 2) {
+            messages[messages.length - 1].remove();
+            messages[messages.length - 2].remove();
+        } else if (messages.length >= 1) {
+            messages[messages.length - 1].remove();
+        }
+        if (userText) {
+            userInput.value = userText;
+            autoResize();
+            userInput.focus();
+        }
+    } else {
+        const resp = await fetch("/api/conversations/" + currentConvId + "/retry", { method: "POST" });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const messages = chatArea.querySelectorAll(".message");
+        if (messages.length >= 2) {
+            messages[messages.length - 1].remove();
+            messages[messages.length - 2].remove();
+        } else if (messages.length >= 1) {
+            messages[messages.length - 1].remove();
+        }
+        if (data.images && data.images.length > 0) {
+            pendingImages = data.images.map((url, i) => ({ name: "image_" + i, base64: url }));
+            renderPreviews();
+        }
+        if (data.user_message) {
+            userInput.value = data.user_message;
+            autoResize();
+            userInput.focus();
+        }
+    }
+    await loadConversations();
+}
+
+function appendRetryButton(msgDiv, userText, rolledBack) {
+    const existing = msgDiv.querySelector(".btn-retry");
+    if (existing) existing.remove();
+    const btn = document.createElement("button");
+    btn.className = "btn-retry" + (rolledBack ? " error-retry" : "");
+    btn.title = "重试";
+    btn.innerHTML = "&#x21bb;";
+    btn.addEventListener("click", () => retryLastMessage(userText, rolledBack));
+    msgDiv.appendChild(btn);
+}
+
+function stopGeneration() {
+    if (currentAbort) {
+        currentAbort.abort();
+        currentAbort = null;
+    }
+    isGenerating = false;
+    btnSend.style.display = "";
+    btnStop.style.display = "none";
+    btnSend.disabled = false;
+}
+
 async function sendMessage() {
     const text = userInput.value.trim();
-    if (!text || isGenerating) return;
+    const hasDoc = pendingDocs.some(d => !d.loading && d.text);
+    if ((!text && pendingImages.length === 0 && !hasDoc) || isGenerating) return;
+    if (pendingDocs.some(d => d.loading)) {
+        showToast("文档正在解析中，请稍候", "error");
+        return;
+    }
 
     if (!currentConvId) {
         await createNewConversation();
     }
 
+    const abortCtrl = new AbortController();
+    currentAbort = abortCtrl;
     isGenerating = true;
-    btnSend.disabled = true;
+    btnSend.style.display = "none";
+    btnStop.style.display = "";
+    const images = pendingImages.slice();
+    const docs = pendingDocs.slice();
+    pendingImages = [];
+    pendingDocs = [];
+    renderPreviews();
     userInput.value = "";
     autoResize();
 
-    addMessage("user", text);
+    addMessage("user", text, images, docs);
+    let renderPending = false;
+    function scheduleRender() {
+        if (renderPending) return;
+        renderPending = true;
+        requestAnimationFrame(() => {
+            renderPending = false;
+            if (cursor.parentNode) cursor.remove();
+            bubble.innerHTML = renderMarkdown(fullText);
+            bubble.appendChild(cursor);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        });
+    }
     const { bubble, cursor } = addAiBubble();
     let fullText = "";
+
+    let messageText = text;
+    if (docs.length > 0) {
+        const docParts = docs.map(d => "[文档: " + d.name + "]\n" + d.text).join("\n\n");
+        messageText = docParts + (text ? "\n\n" + text : "");
+    }
+    const payload = { conversation_id: currentConvId, message: messageText };
+    if (images.length > 0) {
+        payload.images = images.map(img => img.base64);
+    }
 
     try {
         const resp = await fetch("/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ conversation_id: currentConvId, message: text })
+            body: JSON.stringify(payload),
+            signal: abortCtrl.signal
         });
+
+        if (!resp.ok) {
+            let errMsg = "请求失败 (" + resp.status + ")";
+            try {
+                const errData = await resp.json();
+                if (errData.error) errMsg = errData.error;
+            } catch {}
+            if (cursor.parentNode) cursor.remove();
+            bubble.textContent = "";
+            const errDiv = document.createElement("div");
+            errDiv.className = "error-msg";
+            errDiv.textContent = errMsg;
+            bubble.appendChild(errDiv);
+            appendRetryButton(bubble.closest(".message"), text, true);
+            return;
+        }
 
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
@@ -726,103 +1205,91 @@ async function sendMessage() {
                         errDiv.className = "error-msg";
                         errDiv.textContent = parsed.error;
                         bubble.appendChild(errDiv);
+                        appendRetryButton(bubble.closest(".message"), text, true);
                         break;
+                    }
+                    if (parsed.replace) {
+                        fullText = parsed.replace;
+                        if (cursor.parentNode) cursor.remove();
+                        bubble.textContent = "";
+                        const rendered = renderCallBlocks(fullText);
+                        if (rendered) {
+                            bubble.appendChild(rendered);
+                        } else {
+                            bubble.innerHTML = renderMarkdown(fullText);
+                        }
+                        chatArea.scrollTop = chatArea.scrollHeight;
+                    }
+                    if (parsed.chunk) {
+                        fullText += parsed.chunk;
+                        scheduleRender();
                     }
                 } catch {
                     fullText += data;
-                    if (cursor.parentNode) cursor.remove();
-                    bubble.textContent = fullText;
-                    bubble.appendChild(cursor);
-                    chatArea.scrollTop = chatArea.scrollHeight;
+                    scheduleRender();
                 }
             }
         }
     } catch (err) {
+        if (err.name === "AbortError") {
+            if (cursor.parentNode) cursor.remove();
+            if (!fullText) {
+                bubble.textContent = "";
+                const hint = document.createElement("div");
+                hint.className = "error-msg";
+                hint.textContent = "[已中断]";
+                bubble.appendChild(hint);
+            }
+        } else {
+            if (cursor.parentNode) cursor.remove();
+            bubble.textContent = "";
+            const errDiv = document.createElement("div");
+            errDiv.className = "error-msg";
+            errDiv.textContent = "网络错误: " + err.message;
+            bubble.appendChild(errDiv);
+            appendRetryButton(bubble.closest(".message"), text, true);
+        }
+    } finally {
         if (cursor.parentNode) cursor.remove();
-        bubble.textContent = "";
-        const errDiv = document.createElement("div");
-        errDiv.className = "error-msg";
-        errDiv.textContent = "网络错误: " + err.message;
-        bubble.appendChild(errDiv);
+        currentAbort = null;
+        isGenerating = false;
+        btnSend.style.display = "";
+        btnStop.style.display = "none";
+        btnSend.disabled = false;
+        userInput.focus();
     }
-
-    if (cursor.parentNode) cursor.remove();
-    isGenerating = false;
-    btnSend.disabled = false;
-    userInput.focus();
+    if (fullText) {
+        bubble.classList.remove("streaming");
+        const rendered = renderCallBlocks(fullText);
+        if (rendered) {
+            bubble.textContent = "";
+            bubble.appendChild(rendered);
+        } else {
+            bubble.innerHTML = renderMarkdown(fullText);
+        }
+        appendRetryButton(bubble.closest(".message"), text, false);
+    }
     await loadConversations();
 }
 
 // ==================== 设置面板 ====================
 async function openSettings() {
-    if (Object.keys(providers).length === 0) await loadProviders();
-    setProvider.innerHTML = "";
-    for (const [key, val] of Object.entries(providers)) {
-        const opt = document.createElement("option");
-        opt.value = key;
-        opt.textContent = val.name;
-        setProvider.appendChild(opt);
-    }
     const resp = await fetch("/api/settings");
     const cfg = resp.ok ? await resp.json() : {};
-    setProvider.value = cfg.provider || "deepseek";
-    onProviderChange();
-    setBaseUrl.value = cfg.base_url || "";
     setMaxRounds.value = cfg.max_history_rounds || 50;
-    setApiKey.value = "";
-    setKeyFile.value = cfg.key_file_path || "";
-    if (cfg.model) {
-        if (setModel.querySelector('option[value="' + cfg.model + '"]')) {
-            setModel.value = cfg.model;
-            setModelCustom.style.display = "none";
-        } else {
-            setModel.value = "__custom__";
-            setModelCustom.value = cfg.model;
-            setModelCustom.style.display = "block";
-        }
-    }
-    keyStatus.textContent = cfg.has_api_key ? "✓ 已配置 API Key" : "✗ 未配置 API Key";
-    keyStatus.className = "key-status " + (cfg.has_api_key ? "ok" : "no");
+    setMaxContextSize.value = cfg.max_context_size_kb || 0;
     settingsOverlay.classList.add("active");
 }
 
 function closeSettings() { settingsOverlay.classList.remove("active"); }
 
-function onProviderChange() {
-    const key = setProvider.value;
-    const p = providers[key];
-    if (!p) return;
-    if (p.base_url) setBaseUrl.value = p.base_url;
-    setModel.innerHTML = "";
-    if (p.models && p.models.length > 0) {
-        p.models.forEach(m => {
-            const opt = document.createElement("option");
-            opt.value = m;
-            opt.textContent = m;
-            setModel.appendChild(opt);
-        });
-    }
-    const customOpt = document.createElement("option");
-    customOpt.value = "__custom__";
-    customOpt.textContent = "-- 自定义模型名 --";
-    setModel.appendChild(customOpt);
-    setModelCustom.style.display = "none";
-    setModelCustom.value = "";
-}
+
 
 async function saveSettings() {
     const payload = {
-        provider: setProvider.value,
-        base_url: setBaseUrl.value.trim(),
-        model: setModel.value === "__custom__" ? setModelCustom.value.trim() : setModel.value,
-        max_history_rounds: parseInt(setMaxRounds.value) || 50
+        max_history_rounds: parseInt(setMaxRounds.value) || 50,
+        max_context_size_kb: parseInt(setMaxContextSize.value) || 0
     };
-    const apiKeyVal = setApiKey.value.trim();
-    const keyFileVal = setKeyFile.value.trim();
-    if (apiKeyVal) payload.api_key = apiKeyVal;
-    if (keyFileVal) payload.key_file_path = keyFileVal;
-    if (!payload.base_url) { showToast("请填写 API 地址", "error"); return; }
-    if (!payload.model) { showToast("请选择或输入模型名称", "error"); return; }
     try {
         const resp = await fetch("/api/settings", {
             method: "PUT",
@@ -833,7 +1300,6 @@ async function saveSettings() {
         if (resp.ok) {
             showToast("设置已保存", "success");
             closeSettings();
-            await buildQuickModelList();
         } else {
             showToast(result.error || "保存失败", "error");
         }
@@ -859,7 +1325,49 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function renderCallBlocks(text) {
+    const regex = /\[CALL:(\S+?)\]([\s\S]*?)\[\/CALL\]/g;
+    const parts = [];
+    let lastIndex = 0;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+        if (match.index > lastIndex) {
+            parts.push({ type: "text", content: text.slice(lastIndex, match.index) });
+        }
+        parts.push({ type: "call", slug: match[1], content: match[2].trim() });
+        lastIndex = regex.lastIndex;
+    }
+    if (lastIndex < text.length) {
+        parts.push({ type: "text", content: text.slice(lastIndex) });
+    }
+    if (parts.length <= 1 && parts[0] && parts[0].type === "text") return null;
+
+    const container = document.createDocumentFragment();
+    for (const p of parts) {
+        if (p.type === "text") {
+            const span = document.createElement("span");
+            span.textContent = p.content;
+            container.appendChild(span);
+        } else {
+            const block = document.createElement("div");
+            block.className = "agent-call-block";
+            const header = document.createElement("div");
+            header.className = "agent-call-header";
+            header.innerHTML = '<span class="call-arrow">▶</span> 调用智能体 <span class="call-agent-name">' + escapeHtml(p.slug) + '</span>';
+            header.addEventListener("click", () => block.classList.toggle("expanded"));
+            const body = document.createElement("div");
+            body.className = "agent-call-body";
+            body.textContent = p.content;
+            block.appendChild(header);
+            block.appendChild(body);
+            container.appendChild(block);
+        }
+    }
+    return container;
+}
+
 // ==================== 初始化 ====================
 loadConversations();
 buildQuickModelList();
 loadAgentBar();
+

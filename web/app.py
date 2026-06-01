@@ -4,10 +4,14 @@ import os
 import json
 import uuid
 import time
+import threading
 from flask import Flask, render_template, request, Response, jsonify, stream_with_context, send_from_directory
 
 from chat_core import load_api_key, load_system_prompt, HistoryManager, send_chat_request, parse_stream_chunk, build_request_payload
 import requests
+import re
+import csv
+import io
 
 # ==================== 配置区 ====================
 BASE_URL = "https://api.deepseek.com/v1/chat/completions"
@@ -19,6 +23,7 @@ HOST = "0.0.0.0"
 PORT = 8080
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 AGENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.json")
+CONVERSATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conversations.json")
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "uploads")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "svg"}
 # =============================================================
@@ -67,6 +72,12 @@ PROVIDER_MODELS = {
 }
 
 app = Flask(__name__)
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+APP_START_TIME = str(int(time.time()))
+
+@app.context_processor
+def inject_cache_version():
+    return {"cache_version": APP_START_TIME}
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
@@ -78,9 +89,9 @@ def _default_config():
         "model": MODEL,
         "provider": "deepseek",
         "max_history_rounds": MAX_HISTORY_ROUNDS,
+        "max_context_size_kb": 0,
         "custom_models": []
     }
-
 
 def _load_config():
     cfg = _default_config()
@@ -137,13 +148,33 @@ def _save_agents(agents):
         pass
 
 
+def _load_conversations():
+    if os.path.exists(CONVERSATIONS_FILE):
+        try:
+            with open(CONVERSATIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {c["id"]: c for c in data}
+        except Exception:
+            pass
+    return {}
+
+
+def _save_conversations():
+    try:
+        data = list(conversations.values())
+        with open(CONVERSATIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 runtime_config = _load_config()
 agents_list = _load_agents()
-conversations = {}
+conversations = _load_conversations()
 current_agent_id = None
 
 
@@ -183,6 +214,73 @@ def _get_chat_config(agent_id=None):
     }
 
 
+def _get_callable_agents():
+    return [a for a in agents_list if a.get("callable") and a.get("slug")]
+
+
+def _build_callable_prompt(callable_agents):
+    if not callable_agents:
+        return ""
+    lines = ["\n\n你可以调用以下智能体来协助完成任务："]
+    for a in callable_agents:
+        lines.append(f"- {a['slug']}（{a['name']}）: {a.get('when_to_call', '')}")
+    lines.append("\n调用格式：在回复中使用 [CALL:英文标识名] 你要交给该智能体的具体任务描述 [/CALL]")
+    lines.append("你可以在一次回复中调用多个智能体。调用结果会自动返回给你，你再整合后回复用户。")
+    lines.append("如果不需要调用任何智能体，直接回复用户即可。")
+    return "\n".join(lines)
+
+
+def _execute_agent_calls(text):
+    pattern = r"\[CALL:(\S+?)\]([\s\S]*?)\[/CALL\]"
+    matches = re.findall(pattern, text)
+    if not matches:
+        return text
+
+    for slug, task_content in matches:
+        task_content = task_content.strip()
+        agent = None
+        for a in agents_list:
+            if a.get("slug") == slug and a.get("callable"):
+                agent = a
+                break
+        if not agent:
+            result = f"[错误: 未找到智能体 {slug}]"
+        else:
+            try:
+                sub_cfg = _get_chat_config(agent["id"])
+                sub_history = []
+                if agent.get("system_prompt"):
+                    sub_history.append({"role": "system", "content": agent["system_prompt"]})
+                sub_history.append({"role": "user", "content": task_content})
+                resp = send_chat_request(
+                    sub_cfg["base_url"],
+                    sub_cfg["api_key"],
+                    sub_history,
+                    sub_cfg["model"]
+                )
+                if resp.status_code != 200:
+                    result = f"[调用失败: HTTP {resp.status_code}]"
+                else:
+                    sub_reply = ""
+                    for line in resp.iter_lines(decode_unicode=True):
+                        chunk = parse_stream_chunk(line)
+                        if chunk is None:
+                            break
+                        if chunk:
+                            sub_reply += chunk
+                    result = sub_reply if sub_reply else "[智能体无回复]"
+            except Exception as e:
+                result = f"[调用异常: {str(e)}]"
+
+        old_block = f"[CALL:{slug}]{task_content}[/CALL]"
+        # 用正则精确匹配（因为 task_content 可能有换行）
+        escaped_slug = re.escape(slug)
+        block_pattern = f"\\[CALL:{escaped_slug}\\][\\s\\S]*?\\[/CALL\\]"
+        text = re.sub(block_pattern, f"[CALL:{slug}]{result}[/CALL]", text, count=1)
+
+    return text
+
+
 def _new_conversation(agent_id=None):
     cid = str(uuid.uuid4())[:8]
     system_content = _get_system_content(agent_id)
@@ -196,6 +294,7 @@ def _new_conversation(agent_id=None):
         "history": history,
         "created": time.time()
     }
+    _save_conversations()
     return cid
 
 
@@ -224,7 +323,8 @@ def get_settings():
         "model": runtime_config["model"],
         "has_api_key": bool(runtime_config["api_key"]),
         "key_file_path": runtime_config["key_file_path"],
-        "max_history_rounds": runtime_config["max_history_rounds"]
+        "max_history_rounds": runtime_config["max_history_rounds"],
+        "max_context_size_kb": runtime_config.get("max_context_size_kb", 0)
     })
 
 
@@ -240,6 +340,11 @@ def update_settings():
     if "max_history_rounds" in data:
         try:
             runtime_config["max_history_rounds"] = int(data["max_history_rounds"])
+        except (ValueError, TypeError):
+            pass
+    if "max_context_size_kb" in data:
+        try:
+            runtime_config["max_context_size_kb"] = int(data["max_context_size_kb"])
         except (ValueError, TypeError):
             pass
     if "api_key" in data and data["api_key"]:
@@ -324,6 +429,34 @@ def remove_custom_model():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/custom-models", methods=["PUT"])
+def update_custom_model():
+    data = request.get_json()
+    old_provider = data.get("old_provider", "").strip()
+    old_model = data.get("old_model", "").strip()
+    new_provider = data.get("provider", "").strip()
+    new_model = data.get("model", "").strip()
+    new_base_url = data.get("base_url", "").strip()
+    new_name = data.get("name", "").strip()
+    if not new_model:
+        return jsonify({"error": "模型名称不能为空"}), 400
+    models = runtime_config.get("custom_models", [])
+    found = False
+    for m in models:
+        if m["provider"] == old_provider and m["model"] == old_model:
+            m["provider"] = new_provider
+            m["model"] = new_model
+            m["base_url"] = new_base_url
+            m["name"] = new_name
+            found = True
+            break
+    if not found:
+        return jsonify({"error": "未找到原模型"}), 404
+    runtime_config["custom_models"] = models
+    _save_config(runtime_config)
+    return jsonify({"status": "ok"})
+
+
 # ==================== 智能体 API ====================
 
 @app.route("/api/agents", methods=["GET"])
@@ -345,6 +478,9 @@ def create_agent():
         "model": data.get("model", ""),
         "provider": data.get("provider", ""),
         "base_url": data.get("base_url", ""),
+        "callable": data.get("callable", False),
+        "slug": data.get("slug", ""),
+        "when_to_call": data.get("when_to_call", ""),
         "created": time.time()
     }
     agents_list.append(agent)
@@ -370,6 +506,12 @@ def update_agent(agent_id):
         agent["provider"] = data["provider"]
     if "base_url" in data:
         agent["base_url"] = data["base_url"]
+    if "callable" in data:
+        agent["callable"] = data["callable"]
+    if "slug" in data:
+        agent["slug"] = data["slug"]
+    if "when_to_call" in data:
+        agent["when_to_call"] = data["when_to_call"]
     _save_agents(agents_list)
     return jsonify(agent)
 
@@ -397,6 +539,104 @@ def upload_avatar():
     file.save(filepath)
     url = "/static/uploads/" + filename
     return jsonify({"url": url}), 201
+
+
+DOC_EXTENSIONS = {
+    "txt", "md", "log", "json", "xml", "html", "csv",
+    "py", "js", "ts", "java", "c", "cpp", "go", "rs", "sh",
+    "yaml", "yml", "ini", "conf", "cfg", "toml",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "rtf", "odt", "ods", "odp"
+}
+
+def _extract_text(filepath, ext):
+    if ext == "pdf":
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(filepath)
+            pages = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text()
+                if text:
+                    pages.append(f"[第{i+1}页]\n{text}")
+            return "\n\n".join(pages) if pages else "[PDF 无法提取文本内容]"
+        except Exception as e:
+            return f"[PDF 解析失败: {e}]"
+
+    if ext == "docx":
+        try:
+            from docx import Document
+            doc = Document(filepath)
+            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+            return "\n".join(paragraphs) if paragraphs else "[Word 文档内容为空]"
+        except Exception as e:
+            return f"[Word 解析失败: {e}]"
+
+    if ext == "xlsx":
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(filepath, read_only=True, data_only=True)
+            sheets = []
+            for ws in wb.worksheets:
+                rows = []
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) if c is not None else "" for c in row]
+                    rows.append(" | ".join(cells))
+                if rows:
+                    sheets.append(f"[工作表: {ws.title}]\n" + "\n".join(rows))
+            wb.close()
+            return "\n\n".join(sheets) if sheets else "[Excel 文件内容为空]"
+        except Exception as e:
+            return f"[Excel 解析失败: {e}]"
+
+    if ext == "csv":
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                rows = [" | ".join(row) for row in reader]
+            return "\n".join(rows) if rows else "[CSV 文件内容为空]"
+        except Exception as e:
+            return f"[CSV 解析失败: {e}]"
+
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception as e:
+        return f"[文件读取失败: {e}]"
+
+
+@app.route("/api/upload-doc", methods=["POST"])
+def upload_doc():
+    if "file" not in request.files:
+        return jsonify({"error": "没有文件"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "没有选择文件"}), 400
+    ext = file.filename.rsplit(".", 1)[1].lower() if "." in file.filename else ""
+    if ext and ext not in DOC_EXTENSIONS:
+        supported = "PDF、Word(.doc/.docx)、Excel(.xls/.xlsx)、PPT、CSV、TXT、Markdown、代码文件等"
+        return jsonify({"error": f"不支持的文件格式: .{ext}，支持: {supported}"}), 400
+    if not ext:
+        ext = "txt"
+    filename = str(uuid.uuid4())[:12] + "." + ext
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    file.save(filepath)
+    text = _extract_text(filepath, ext)
+    max_chars = 100000
+    truncated = False
+    if len(text) > max_chars:
+        text = text[:max_chars]
+        truncated = True
+    try:
+        os.remove(filepath)
+    except Exception:
+        pass
+    return jsonify({
+        "filename": file.filename,
+        "text": text,
+        "char_count": len(text),
+        "truncated": truncated
+    })
 
 
 @app.route("/api/current-agent", methods=["GET"])
@@ -436,6 +676,7 @@ def create_conversation():
 def delete_conversation(cid):
     if cid in conversations:
         del conversations[cid]
+        _save_conversations()
     return jsonify({"status": "ok"})
 
 
@@ -446,6 +687,7 @@ def rename_conversation(cid):
         return jsonify({"error": "对话不存在"}), 404
     data = request.get_json()
     conv["title"] = data.get("title", "新对话")[:50]
+    _save_conversations()
     return jsonify({"status": "ok"})
 
 
@@ -470,6 +712,7 @@ def update_conversation_agent(cid):
     system_content = _get_system_content(new_agent_id)
     if system_content:
         conv["history"].insert(0, {"role": "system", "content": system_content})
+    _save_conversations()
     return jsonify({"status": "ok", "agent_id": new_agent_id})
 
 
@@ -478,8 +721,9 @@ def chat():
     data = request.get_json()
     cid = data.get("conversation_id", "")
     user_input = data.get("message", "").strip()
+    images = data.get("images", [])
 
-    if not user_input:
+    if not user_input and not images:
         return jsonify({"error": "消息不能为空"}), 400
 
     if not runtime_config["api_key"]:
@@ -494,44 +738,127 @@ def chat():
 
     history = conv["history"]
     mgr = HistoryManager(history, runtime_config["max_history_rounds"], "AI")
-    mgr.add_user_message(user_input)
+
+    if images:
+        content_blocks = []
+        if user_input:
+            content_blocks.append({"type": "text", "text": user_input})
+        for img_data in images:
+            content_blocks.append({"type": "image_url", "image_url": {"url": img_data}})
+        mgr.add_user_message(content_blocks)
+    else:
+        mgr.add_user_message(user_input)
+
+    max_size_kb = runtime_config.get("max_context_size_kb", 0)
+    if max_size_kb > 0:
+        max_bytes = int(max_size_kb * 1024)
+        while len(json.dumps(history, ensure_ascii=False).encode("utf-8")) > max_bytes:
+            non_sys = [i for i, m in enumerate(history) if m["role"] != "system"]
+            if len(non_sys) <= 1:
+                break
+            history.pop(non_sys[0])
+
 
     non_sys = [m for m in history if m["role"] != "system"]
     if len(non_sys) == 1:
-        conv["title"] = user_input[:30]
+        title_text = user_input if user_input else ("[图片]" if images else "新对话")
+        conv["title"] = title_text[:30]
+
+    callable_agents = _get_callable_agents()
+    callable_prompt = _build_callable_prompt(callable_agents)
+
+    def _build_request_history():
+        if not callable_prompt:
+            return history
+        req_history = list(history)
+        sys_idx = next((i for i, m in enumerate(req_history) if m["role"] == "system"), -1)
+        if sys_idx >= 0:
+            req_history[sys_idx] = dict(req_history[sys_idx])
+            req_history[sys_idx]["content"] = req_history[sys_idx]["content"] + callable_prompt
+        else:
+            req_history.insert(0, {"role": "system", "content": callable_prompt.strip()})
+        return req_history
+
+    stream_state = {"full_reply": "", "saved": False, "request_sent": False, "cancel": threading.Event(), "upstream_resp": None}
 
     def generate():
         try:
             resp = send_chat_request(
                 chat_cfg["base_url"],
                 chat_cfg["api_key"],
-                history,
+                _build_request_history(),
                 chat_cfg["model"]
             )
+            stream_state["upstream_resp"] = resp
+            stream_state["request_sent"] = True
             if resp.status_code != 200:
                 mgr.rollback_user_message()
+                stream_state["saved"] = True
                 error_data = json.dumps({"error": f"请求失败 [{resp.status_code}]"}, ensure_ascii=False)
                 yield f"data: {error_data}\n\n"
                 return
 
-            full_reply = ""
+            history.append({"role": "assistant", "content": ""})
             for line in resp.iter_lines(decode_unicode=True):
+                if stream_state["cancel"].is_set():
+                    break
                 content = parse_stream_chunk(line)
                 if content is None:
                     break
                 if content:
-                    full_reply += content
-                    yield f"data: {content}\n\n"
+                    stream_state["full_reply"] += content
+                    history[-1]["content"] = stream_state["full_reply"]
+                    chunk_data = json.dumps({"chunk": content}, ensure_ascii=False)
+                    yield f"data: {chunk_data}\n\n"
 
-            mgr.save_assistant_reply(full_reply)
+            full_reply = stream_state["full_reply"]
+            if callable_agents and re.search(r"\[CALL:\S+?\]", full_reply):
+                yield "data: \n\n"
+                final_reply = _execute_agent_calls(full_reply)
+                replace_data = json.dumps({"replace": final_reply}, ensure_ascii=False)
+                yield f"data: {replace_data}\n\n"
+                history[-1]["content"] = final_reply
+                mgr._trim_history()
+            else:
+                mgr._trim_history()
+            stream_state["saved"] = True
+            _save_conversations()
             yield "data: [DONE]\n\n"
 
+        except GeneratorExit:
+            return
         except Exception as e:
-            mgr.rollback_user_message()
+            if not stream_state["saved"]:
+                if not stream_state["full_reply"] and history and history[-1].get("role") == "assistant" and history[-1].get("content") == "":
+                    history.pop()
+                    mgr.rollback_user_message()
+                stream_state["saved"] = True
+                _save_conversations()
             error_data = json.dumps({"error": str(e)}, ensure_ascii=False)
             yield f"data: {error_data}\n\n"
 
-    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+    def on_close():
+        stream_state["cancel"].set()
+        upstream = stream_state.get("upstream_resp")
+        if upstream:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+        if not stream_state["saved"]:
+            if not stream_state["full_reply"] and history and history[-1].get("role") == "assistant" and history[-1].get("content") == "":
+                history.pop()
+                if not stream_state["request_sent"]:
+                    mgr.rollback_user_message()
+            stream_state["saved"] = True
+            _save_conversations()
+
+
+    resp = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    resp.call_on_close(on_close)
+    return resp
+
 
 
 @app.route("/api/conversations/<cid>/clear", methods=["POST"])
@@ -544,10 +871,35 @@ def clear_conversation(cid):
     system_content = _get_system_content(agent_id)
     if system_content:
         conv["history"].append({"role": "system", "content": system_content})
+    _save_conversations()
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/conversations/<cid>/retry", methods=["POST"])
+def retry_conversation(cid):
+    conv = _get_conv(cid)
+    if not conv:
+        return jsonify({"error": "对话不存在"}), 404
+    history = conv["history"]
+    removed_user_content = ""
+    removed_images = []
+    if history and history[-1]["role"] == "assistant":
+        history.pop()
+    if history and history[-1]["role"] == "user":
+        raw = history.pop()["content"]
+        if isinstance(raw, list):
+            for block in raw:
+                if block.get("type") == "text":
+                    removed_user_content = block.get("text", "")
+                elif block.get("type") == "image_url":
+                    removed_images.append(block["image_url"]["url"])
+        else:
+            removed_user_content = raw
+    _save_conversations()
+    return jsonify({"status": "ok", "user_message": removed_user_content, "images": removed_images})
 
 
 if __name__ == "__main__":
     print(f"🌐 Web 聊天界面启动中...")
     print(f"📎 打开浏览器访问: http://localhost:{PORT}")
-    app.run(host=HOST, port=PORT, debug=False)
+    app.run(host=HOST, port=PORT, debug=False, threaded=True)

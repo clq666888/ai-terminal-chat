@@ -878,9 +878,7 @@ body {
     background: rgba(108,138,255,0.08);
 }
 
-.custom-model-item.is-active .btn-remove-model {
-    visibility: hidden;
-}
+
 
 .empty-hint {
     color: var(--text-secondary);
@@ -1335,7 +1333,11 @@ body {
 .agent-form-actions {
     display: flex;
     gap: 10px;
-    margin-top: 20px;
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--settings-bg);
+    border-radius: 0 0 16px 16px;
+    flex-shrink: 0;
 }
 
 .btn-agent-cancel {
@@ -1372,4 +1374,680 @@ body {
 
 .btn-agent-save:hover {
     background: var(--accent-hover);
+}
+
+.manage-actions-row {
+    display: flex;
+    gap: 10px;
+}
+.manage-actions-row .btn-save-settings {
+    flex: 1;
+}
+.manage-actions-row .btn-add-model {
+    flex: 1;
+    margin-top: 0;
+}
+
+.scrollable-list {
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 4px;
+}
+.scrollable-list::-webkit-scrollbar {
+    width: 6px;
+}
+.scrollable-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+.scrollable-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+}
+.model-item-actions {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+.btn-edit-model {
+    background: none;
+    border: none;
+    color: #8b8fa3;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+}
+.btn-edit-model:hover {
+    color: #7c8af6;
+    background: rgba(124, 138, 246, 0.1);
+}
+
+.btn-stop {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: none;
+    background: #ff6b6b;
+    color: white;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.15s;
+}
+.btn-stop:hover {
+    background: #ee5a5a;
+}
+
+.message .btn-retry {
+    display: none;
+    align-items: center;
+    align-self: flex-end;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 17px;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex-shrink: 0;
+    margin-bottom: 4px;
+    opacity: 0.6;
+}
+
+.message:hover .btn-retry,
+.message .btn-retry.error-retry {
+    display: inline-flex;
+}
+
+.message .btn-retry:hover {
+    background: rgba(124, 138, 246, 0.12);
+    border-color: rgba(124, 138, 246, 0.3);
+    color: var(--accent);
+    opacity: 1;
+    transform: rotate(90deg);
+}
+
+.message .btn-retry.error-retry {
+    opacity: 0.85;
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.2);
+    background: rgba(239, 68, 68, 0.06);
+}
+
+.message .btn-retry.error-retry:hover {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.4);
+    color: var(--danger);
+    opacity: 1;
+}
+
+.error-msg {
+    display: inline;
+}
+
+.callable-toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+    flex-shrink: 0;
+}
+
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--border);
+    border-radius: 24px;
+    transition: 0.25s;
+}
+
+.toggle-slider::before {
+    content: "";
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    left: 3px;
+    bottom: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: 0.25s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+    background: var(--accent);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(20px);
+}
+
+#callable-fields {
+    border-left: 2px solid var(--accent);
+    padding-left: 14px;
+    margin-top: 12px;
+}
+
+.input-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+}
+
+.required {
+    color: var(--danger);
+}
+
+.agent-call-block {
+    margin: 8px 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-secondary);
+}
+
+.agent-call-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 13px;
+    color: var(--text-dim);
+    transition: background 0.15s;
+}
+
+.agent-call-header:hover {
+    background: rgba(124, 138, 246, 0.06);
+}
+
+.agent-call-header .call-arrow {
+    font-size: 10px;
+    transition: transform 0.2s;
+    color: var(--accent);
+}
+
+.agent-call-block.expanded .call-arrow {
+    transform: rotate(90deg);
+}
+
+.agent-call-header .call-agent-name {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.agent-call-body {
+    display: none;
+    padding: 10px 14px;
+    font-size: 13px;
+    line-height: 1.7;
+    border-top: 1px solid var(--border);
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.agent-call-block.expanded .agent-call-body {
+    display: block;
+}
+
+.callable-badge {
+    display: inline-block;
+    margin-left: 4px;
+    font-size: 12px;
+    vertical-align: middle;
+    cursor: help;
+}
+
+/* ==================== 智能体互调 ==================== */
+.callable-toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.callable-toggle-row .setting-label {
+    margin-bottom: 0;
+}
+
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+    flex-shrink: 0;
+}
+
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--bg-tertiary, #333);
+    border-radius: 24px;
+    transition: 0.25s;
+}
+
+.toggle-slider::before {
+    content: "";
+    position: absolute;
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: 0.25s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+    background: var(--accent);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(20px);
+}
+
+.input-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+}
+
+.required {
+    color: var(--danger);
+}
+
+/* 折叠调用块 */
+.agent-call-block {
+    margin: 10px 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-secondary);
+}
+
+.agent-call-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 13px;
+    color: var(--text-dim);
+    transition: background 0.15s;
+}
+
+.agent-call-header:hover {
+    background: rgba(124, 138, 246, 0.06);
+}
+
+.agent-call-header .call-arrow {
+    font-size: 10px;
+    transition: transform 0.2s;
+    color: var(--text-dim);
+}
+
+.agent-call-block.expanded .call-arrow {
+    transform: rotate(90deg);
+}
+
+.agent-call-header .call-agent-name {
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.agent-call-header .call-status {
+    margin-left: auto;
+    font-size: 12px;
+}
+
+.agent-call-body {
+    display: none;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.agent-call-block.expanded .agent-call-body {
+    display: block;
+}
+
+/* ==================== 图片上传 ==================== */
+.btn-attach {
+    width: 36px;
+    height: 36px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.15s;
+}
+
+.btn-attach:hover {
+    background: var(--bg-hover);
+    color: var(--accent);
+}
+
+.image-preview-bar {
+    display: none;
+    flex-wrap: wrap;
+    gap: 8px;
+    max-width: 800px;
+    margin: 0 auto 8px;
+    padding: 8px 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.image-preview-item {
+    position: relative;
+    width: 72px;
+    height: 72px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.image-preview-item img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.image-preview-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.image-preview-item:hover .image-preview-remove {
+    opacity: 1;
+}
+
+/* ==================== 消息中的图片 ==================== */
+.msg-images {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.msg-images img {
+    max-width: 200px;
+    max-height: 200px;
+    border-radius: 8px;
+    cursor: pointer;
+    object-fit: cover;
+    transition: opacity 0.15s;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.msg-images img:hover {
+    opacity: 0.85;
+}
+
+/* ==================== 图片查看器 ==================== */
+.image-viewer-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: zoom-out;
+    backdrop-filter: blur(4px);
+    animation: fadeIn 0.2s ease;
+}
+
+.image-viewer-overlay img {
+    max-width: 90vw;
+    max-height: 90vh;
+    border-radius: 8px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* ==================== 文档预览卡片 ==================== */
+.doc-preview-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-main);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    min-width: 160px;
+    max-width: 240px;
+    position: relative;
+}
+
+.doc-preview-icon {
+    font-size: 22px;
+    flex-shrink: 0;
+}
+
+.doc-preview-info {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.doc-preview-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.doc-preview-status {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 2px;
+}
+
+.doc-preview-remove {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.doc-preview-item:hover .doc-preview-remove {
+    opacity: 1;
+}
+
+/* ==================== 消息中的文档标签 ==================== */
+.msg-docs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.msg-doc-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+/* ==================== 拖拽上传 ==================== */
+.chat-area.drag-over {
+    outline: 2px dashed var(--accent);
+    outline-offset: -4px;
+    background: rgba(99, 102, 241, 0.04);
+}
+
+/* ==================== Markdown 内容样式 ==================== */
+.bubble h1, .bubble h2, .bubble h3, .bubble h4 {
+    margin: 12px 0 6px;
+    line-height: 1.4;
+}
+.bubble h1 { font-size: 1.3em; }
+.bubble h2 { font-size: 1.15em; }
+.bubble h3 { font-size: 1.05em; }
+
+.bubble p {
+    margin: 6px 0;
+}
+
+.bubble ul, .bubble ol {
+    margin: 6px 0;
+    padding-left: 1.6em;
+}
+
+.bubble li {
+    margin: 3px 0;
+}
+
+.bubble code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 0.9em;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+}
+
+.bubble pre {
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 8px 0;
+}
+
+.bubble pre code {
+    background: none;
+    padding: 0;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.bubble blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 8px 0;
+    padding: 4px 12px;
+    color: var(--text-dim);
+}
+
+.bubble table {
+    border-collapse: collapse;
+    margin: 8px 0;
+    width: 100%;
+    font-size: 13px;
+}
+
+.bubble th, .bubble td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.bubble th {
+    background: rgba(255, 255, 255, 0.05);
+    font-weight: 600;
+}
+
+.bubble hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 12px 0;
+}
+
+.bubble a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.bubble a:hover {
+    text-decoration: underline;
+}
+
+.bubble strong {
+    font-weight: 600;
+}
+
+.message.ai .bubble {
+    white-space: normal;
+}
+
+.message.ai .bubble.streaming {
+    white-space: normal;
 }

@@ -94,4 +94,4 @@ def parse_stream_chunk(line):
 
 def send_chat_request(base_url, api_key, messages, model, temperature=0.7):
     headers, payload = build_request_payload(api_key, messages, model, temperature, stream=True)
-    return requests.post(base_url, json=payload, headers=headers, stream=True)
+    return requests.post(base_url, json=payload, headers=headers, stream=True, timeout=(10, 30))
