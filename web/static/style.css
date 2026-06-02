@@ -700,8 +700,8 @@ body {
 
 .toast.error {
     border-color: #ef4444;
-    background: rgba(239, 68, 68, 0.15);
-    color: #fca5a5;
+    background: #7f1d1d;
+    color: #fecaca;
     white-space: pre-line;
 }
 
