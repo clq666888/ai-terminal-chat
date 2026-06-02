@@ -26,7 +26,7 @@ def load_system_prompt(file_path):
         return None
 
 
-def build_request_payload(api_key, messages, model, temperature=0.7, stream=True):
+def build_request_payload(api_key, messages, model, temperature=0.7, stream=True, tools=None):
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
@@ -37,6 +37,9 @@ def build_request_payload(api_key, messages, model, temperature=0.7, stream=True
         "temperature": temperature,
         "stream": stream
     }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     return headers, payload
 
 
@@ -56,6 +59,16 @@ class HistoryManager:
     def save_assistant_reply(self, content):
         self.history.append({"role": "assistant", "content": content})
         self._trim_history()
+
+    def save_tool_call_message(self, message_dict):
+        self.history.append(message_dict)
+
+    def save_tool_result(self, tool_call_id, content):
+        self.history.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content
+        })
 
     def _trim_history(self):
         if self.max_rounds <= 0:
@@ -87,11 +100,28 @@ def parse_stream_chunk(line):
     try:
         chunk = json.loads(data_str)
         delta = chunk["choices"][0]["delta"]
-        return delta.get("content", "")
+        content = delta.get("content") or ""
+        reasoning = delta.get("reasoning_content") or ""
+        if content:
+            return content
+        if reasoning:
+            return reasoning
+        return ""
     except Exception:
         return ""
 
 
-def send_chat_request(base_url, api_key, messages, model, temperature=0.7):
-    headers, payload = build_request_payload(api_key, messages, model, temperature, stream=True)
-    return requests.post(base_url, json=payload, headers=headers, stream=True)
+def _normalize_base_url(base_url):
+    url = base_url.rstrip("/")
+    if not url.endswith("/chat/completions"):
+        url += "/chat/completions"
+    return url
+
+
+def send_chat_request(base_url, api_key, messages, model, temperature=0.7, tools=None, stream=True):
+    url = _normalize_base_url(base_url)
+    headers, payload = build_request_payload(api_key, messages, model, temperature, stream=stream, tools=tools)
+    if stream:
+        return requests.post(url, json=payload, headers=headers, stream=True, timeout=(10, 120))
+    else:
+        return requests.post(url, json=payload, headers=headers, timeout=(10, 120))

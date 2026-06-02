@@ -1,0 +1,20 @@
+[名称]
+DeepSeek
+[标识名]
+global
+[系统提示词]
+[服务商]
+deepseek
+[API地址]
+[API Key 文件]
+/home/sti/apikey.txt
+[API Key]
+[模型]
+deepseek-chat
+[温度]
+0.7
+[可用工具]
+read_file, edit_file, run_command, list_dir, search_files
+[可被调用]
+否
+[何时调用]
