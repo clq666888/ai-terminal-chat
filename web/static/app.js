@@ -140,10 +140,29 @@ imageFileInput.addEventListener("change", handleImageSelect);
 userInput.addEventListener("paste", handleImagePaste);
 
 const DOC_EXTENSIONS = new Set([
-    "pdf","doc","docx","xls","xlsx","ppt","pptx","csv","txt","md","log",
+    "pdf","docx","xlsx","csv","txt","md","log",
     "json","xml","html","py","js","ts","java","c","cpp","go","rs","sh",
-    "yaml","yml","ini","conf","cfg","toml","rtf","odt","ods","odp"
+    "yaml","yml","ini","conf","cfg","toml"
 ]);
+
+const REJECTED_EXTENSIONS = {
+    "doc": "请将 .doc 转换为 .docx 后上传",
+    "xls": "请将 .xls 转换为 .xlsx 后上传",
+    "ppt": "请将 .ppt 转换为 .pptx 后上传",
+    "pptx": "暂不支持 .pptx 格式",
+    "rtf": "暂不支持 .rtf 格式",
+    "odt": "暂不支持 .odt 格式",
+    "ods": "暂不支持 .ods 格式",
+    "odp": "暂不支持 .odp 格式",
+    "zip": "不支持压缩包",
+    "rar": "不支持压缩包",
+    "7z": "不支持压缩包",
+    "tar": "不支持压缩包",
+    "gz": "不支持压缩包",
+    "exe": "不支持可执行文件",
+    "bin": "不支持二进制文件",
+    "dll": "不支持二进制文件"
+};
 
 let dragCounter = 0;
 document.addEventListener("dragenter", e => {
@@ -197,7 +216,11 @@ function checkFileAllowed(file) {
     const ext = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
     if (file.type.startsWith("image/")) return true;
     if (DOC_EXTENSIONS.has(ext)) return true;
-    showToast("不支持的文件格式: ." + ext + "\n支持: 图片、PDF、Word、Excel、PPT、CSV、TXT、代码文件等", "error");
+    if (REJECTED_EXTENSIONS[ext]) {
+        showToast(REJECTED_EXTENSIONS[ext] + "\n\n支持的文档格式: PDF、Word(.docx)、Excel(.xlsx)、CSV、TXT、Markdown、代码文件", "error");
+    } else {
+        showToast("不支持的文件格式: ." + ext + "\n\n支持的文档格式: PDF、Word(.docx)、Excel(.xlsx)、CSV、TXT、Markdown、代码文件", "error");
+    }
     return false;
 }
 
@@ -958,6 +981,29 @@ function showWelcome() { chatArea.innerHTML = welcomeHTML; }
 function hideWelcome() { const w = chatArea.querySelector(".welcome"); if (w) w.remove(); }
 
 // ==================== 消息渲染与发送 ====================
+let userScrolledUp = false;
+
+chatArea.addEventListener("scroll", () => {
+    const gap = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight;
+    if (gap < 30) {
+        userScrolledUp = false;
+    }
+}, { passive: true });
+
+chatArea.addEventListener("wheel", (e) => {
+    if (e.deltaY < 0) userScrolledUp = true;
+}, { passive: true });
+
+chatArea.addEventListener("touchmove", () => {
+    const gap = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight;
+    if (gap > 50) userScrolledUp = true;
+}, { passive: true });
+
+function shouldAutoScroll() {
+    if (userScrolledUp) return false;
+    return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 30;
+}
+
 function addMessage(role, content, images, docs) {
     hideWelcome();
     const div = document.createElement("div");
@@ -1105,6 +1151,7 @@ function stopGeneration() {
 }
 
 async function sendMessage() {
+    userScrolledUp = false;
     const text = userInput.value.trim();
     const hasDoc = pendingDocs.some(d => !d.loading && d.text);
     if ((!text && pendingImages.length === 0 && !hasDoc) || isGenerating) return;
@@ -1138,13 +1185,23 @@ async function sendMessage() {
         requestAnimationFrame(() => {
             renderPending = false;
             if (cursor.parentNode) cursor.remove();
-            bubble.innerHTML = renderMarkdown(fullText);
+            let html = "";
+            if (reasoningText) {
+                const summary = isReasoning ? "思考中..." : "已深度思考";
+                html += '<details class="reasoning-block"' + (isReasoning ? ' open' : '') + '><summary>' + summary + '</summary><div class="reasoning-content">' + renderMarkdown(reasoningText) + '</div></details>';
+            }
+            if (fullText) {
+                html += renderMarkdown(fullText);
+            }
+            bubble.innerHTML = html;
             bubble.appendChild(cursor);
-            chatArea.scrollTop = chatArea.scrollHeight;
+            if (shouldAutoScroll()) chatArea.scrollTop = chatArea.scrollHeight;
         });
     }
     const { bubble, cursor } = addAiBubble();
     let fullText = "";
+    let reasoningText = "";
+    let isReasoning = false;
 
     let messageText = text;
     if (docs.length > 0) {
@@ -1218,7 +1275,18 @@ async function sendMessage() {
                         } else {
                             bubble.innerHTML = renderMarkdown(fullText);
                         }
-                        chatArea.scrollTop = chatArea.scrollHeight;
+                        if (shouldAutoScroll()) chatArea.scrollTop = chatArea.scrollHeight;
+                    }
+                    if (parsed.reasoning_start) {
+                        isReasoning = true;
+                    }
+                    if (parsed.reasoning) {
+                        reasoningText += parsed.reasoning;
+                        scheduleRender();
+                    }
+                    if (parsed.reasoning_end) {
+                        isReasoning = false;
+                        scheduleRender();
                     }
                     if (parsed.chunk) {
                         fullText += parsed.chunk;
@@ -1258,15 +1326,23 @@ async function sendMessage() {
         btnSend.disabled = false;
         userInput.focus();
     }
-    if (fullText) {
+    if (fullText || reasoningText) {
         bubble.classList.remove("streaming");
-        const rendered = renderCallBlocks(fullText);
-        if (rendered) {
-            bubble.textContent = "";
-            bubble.appendChild(rendered);
-        } else {
-            bubble.innerHTML = renderMarkdown(fullText);
+        let finalHtml = "";
+        if (reasoningText) {
+            finalHtml += '<details class="reasoning-block"><summary>已深度思考</summary><div class="reasoning-content">' + renderMarkdown(reasoningText) + '</div></details>';
         }
+        if (fullText) {
+            const rendered = renderCallBlocks(fullText);
+            if (rendered) {
+                const tmp = document.createElement("div");
+                tmp.appendChild(rendered);
+                finalHtml += tmp.innerHTML;
+            } else {
+                finalHtml += renderMarkdown(fullText);
+            }
+        }
+        bubble.innerHTML = finalHtml;
         appendRetryButton(bubble.closest(".message"), text, false);
     }
     await loadConversations();
@@ -1316,7 +1392,8 @@ function showToast(msg, type) {
     toast.className = "toast " + (type || "");
     toast.textContent = msg;
     document.body.appendChild(toast);
-    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 2500);
+    const duration = type === "error" ? 4000 : 2500;
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, duration);
 }
 
 function escapeHtml(text) {

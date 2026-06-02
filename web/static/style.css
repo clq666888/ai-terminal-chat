@@ -269,7 +269,7 @@ body {
 .chat-area {
     flex: 1;
     overflow-y: auto;
-    padding: 32px 24px;
+    padding: 32px 16px;
     background: var(--bg-chat);
     scroll-behavior: smooth;
 }
@@ -320,7 +320,7 @@ body {
     display: flex;
     gap: 12px;
     margin-bottom: 28px;
-    max-width: 800px;
+    max-width: 960px;
     margin-left: auto;
     margin-right: auto;
     animation: fadeIn 0.25s ease;
@@ -360,7 +360,7 @@ body {
 }
 
 .bubble {
-    max-width: 72%;
+    max-width: 82%;
     padding: 10px 16px;
     border-radius: 14px;
     line-height: 1.75;
@@ -408,7 +408,7 @@ body {
     display: flex;
     align-items: flex-end;
     gap: 10px;
-    max-width: 800px;
+    max-width: 960px;
     margin: 0 auto;
     background: var(--bg-input);
     border: 1px solid var(--border);
@@ -699,7 +699,10 @@ body {
 }
 
 .toast.error {
-    border-color: var(--danger);
+    border-color: #ef4444;
+    background: rgba(239, 68, 68, 0.15);
+    color: #fca5a5;
+    white-space: pre-line;
 }
 
 @keyframes toastIn {
@@ -906,12 +909,12 @@ body {
 
 /* ==================== 底栏布局 ==================== */
 .agent-bar-row {
-    max-width: 800px;
+    max-width: 960px;
     margin: 0 auto 6px;
 }
 
 .footer-bar {
-    max-width: 800px;
+    max-width: 960px;
     margin: 6px auto 0;
     display: flex;
     align-items: center;
@@ -2050,4 +2053,36 @@ body {
 
 .message.ai .bubble.streaming {
     white-space: normal;
+}
+
+/* Reasoning block (thinking process) */
+.reasoning-block {
+    margin-bottom: 12px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 8px;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.03);
+}
+.reasoning-block summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: #888;
+    user-select: none;
+}
+.reasoning-block summary:hover {
+    color: #aaa;
+}
+.reasoning-block[open] summary {
+    margin-bottom: 8px;
+}
+.reasoning-content {
+    font-size: 13px;
+    color: #999;
+    line-height: 1.5;
+    max-height: 300px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+.reasoning-content p {
+    margin: 4px 0;
 }

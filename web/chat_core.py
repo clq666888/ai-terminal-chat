@@ -87,11 +87,41 @@ def parse_stream_chunk(line):
     try:
         chunk = json.loads(data_str)
         delta = chunk["choices"][0]["delta"]
-        return delta.get("content", "")
+        content = delta.get("content") or ""
+        reasoning = delta.get("reasoning_content") or ""
+        if content:
+            return content
+        if reasoning:
+            return reasoning
+        return ""
     except Exception:
         return ""
 
 
+def parse_stream_chunk_full(line):
+    if not line or not line.startswith("data: "):
+        return ("", "")
+    data_str = line[6:]
+    if data_str == "[DONE]":
+        return None
+    try:
+        chunk = json.loads(data_str)
+        delta = chunk["choices"][0]["delta"]
+        content = delta.get("content") or ""
+        reasoning = delta.get("reasoning_content") or ""
+        return (content, reasoning)
+    except Exception:
+        return ("", "")
+
+
+def _normalize_base_url(base_url):
+    url = base_url.rstrip("/")
+    if not url.endswith("/chat/completions"):
+        url += "/chat/completions"
+    return url
+
+
 def send_chat_request(base_url, api_key, messages, model, temperature=0.7):
+    url = _normalize_base_url(base_url)
     headers, payload = build_request_payload(api_key, messages, model, temperature, stream=True)
-    return requests.post(base_url, json=payload, headers=headers, stream=True, timeout=(10, 30))
+    return requests.post(url, json=payload, headers=headers, stream=True, timeout=(10, 30))

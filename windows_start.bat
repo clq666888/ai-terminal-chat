@@ -22,9 +22,93 @@ if /i "%CMD%"=="stop"    goto do_stop
 if /i "%CMD%"=="restart" goto do_restart
 if /i "%CMD%"=="status"  goto do_status
 if /i "%CMD%"=="log"     goto do_log
+if /i "%CMD%"=="install" goto do_install
 goto usage
 
+:check_dependencies
+set "DEPS_OK=1"
+set "MISSING_PY="
+set "MISSING_OPT="
+
+where python >nul 2>&1
+if errorlevel 1 (
+    echo ❌ 未找到 python，请先安装 Python 3.8+
+    echo    下载地址: https://www.python.org/downloads/
+    echo    安装时请勾选 "Add Python to PATH"
+    set "DEPS_OK=0"
+    goto :eof
+)
+
+python -c "import flask" 2>nul
+if errorlevel 1 set "MISSING_PY=!MISSING_PY! flask"
+
+python -c "import requests" 2>nul
+if errorlevel 1 set "MISSING_PY=!MISSING_PY! requests"
+
+if not "!MISSING_PY!"=="" (
+    echo ❌ 缺少必要 Python 包:!MISSING_PY!
+    echo.
+    set /p "ANSWER=是否一键安装? [Y/n] "
+    if "!ANSWER!"=="" set "ANSWER=Y"
+    if /i "!ANSWER!"=="Y" (
+        echo ⏳ 正在安装:!MISSING_PY!
+        python -m pip install!MISSING_PY!
+        if errorlevel 1 (
+            echo ❌ 安装失败，请手动执行: pip install!MISSING_PY!
+            set "DEPS_OK=0"
+            goto :eof
+        )
+        echo ✅ 必要包安装完成
+    ) else (
+        echo 请手动安装: pip install!MISSING_PY!
+        set "DEPS_OK=0"
+        goto :eof
+    )
+)
+
+python -c "from PyPDF2 import PdfReader" 2>nul
+if errorlevel 1 set "MISSING_OPT=!MISSING_OPT! PyPDF2"
+
+python -c "import docx" 2>nul
+if errorlevel 1 set "MISSING_OPT=!MISSING_OPT! python-docx"
+
+python -c "import openpyxl" 2>nul
+if errorlevel 1 set "MISSING_OPT=!MISSING_OPT! openpyxl"
+
+if not "!MISSING_OPT!"=="" (
+    echo ⚠️  以下可选包未安装（文件解析功能需要）:!MISSING_OPT!
+    echo.
+    set /p "ANSWER2=是否安装可选包? [y/N] "
+    if "!ANSWER2!"=="" set "ANSWER2=N"
+    if /i "!ANSWER2!"=="Y" (
+        echo ⏳ 正在安装:!MISSING_OPT!
+        python -m pip install!MISSING_OPT!
+        if errorlevel 1 (
+            echo ⚠️  部分可选包安装失败，不影响基本功能
+        ) else (
+            echo ✅ 可选包安装完成
+        )
+    )
+)
+goto :eof
+
+:do_install
+echo 🔧 PolyAI Chat 一键安装依赖
+echo ==============================
+call :check_dependencies
+if "!DEPS_OK!"=="1" (
+    echo.
+    echo ✅ 所有依赖已就绪
+)
+goto :eof
+
 :do_start
+call :check_dependencies
+if "!DEPS_OK!"=="0" (
+    pause
+    exit /b 1
+)
+
 call :check_running
 if defined RUNNING_PID (
     echo ⚠️  PolyAI Chat 已在运行 ^(PID: !RUNNING_PID!^)
@@ -117,13 +201,14 @@ if errorlevel 1 (
 goto :eof
 
 :usage
-echo 用法: %~nx0 [start^|stop^|restart^|status^|log]
+echo 用法: %~nx0 [start^|stop^|restart^|status^|log^|install]
 echo.
 echo   start    启动 PolyAI Chat（默认，可双击运行）
 echo   stop     关闭 PolyAI Chat
 echo   restart  重启 PolyAI Chat
 echo   status   查看运行状态
 echo   log      查看最近日志
+echo   install  检测并安装所有依赖
 echo.
 echo 双击直接运行等同于 start 命令。
 pause

@@ -7,16 +7,16 @@ import time
 import threading
 from flask import Flask, render_template, request, Response, jsonify, stream_with_context, send_from_directory
 
-from chat_core import load_api_key, load_system_prompt, HistoryManager, send_chat_request, parse_stream_chunk, build_request_payload
+from chat_core import load_api_key, load_system_prompt, HistoryManager, send_chat_request, parse_stream_chunk, parse_stream_chunk_full, build_request_payload
 import requests
 import re
 import csv
 import io
 
 # ==================== 配置区 ====================
-BASE_URL = "https://api.deepseek.com/v1/chat/completions"
+BASE_URL = "https://api.deepseek.com"
 KEY_FILE_PATH = "/home/sti/apikey.txt"
-MODEL = "deepseek-chat"
+MODEL = "deepseek-v4-flash"
 AI_NAME = "AI Chat"
 MAX_HISTORY_ROUNDS = 50
 HOST = "0.0.0.0"
@@ -31,37 +31,37 @@ ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "svg"}
 PROVIDER_MODELS = {
     "deepseek": {
         "name": "DeepSeek",
-        "base_url": "https://api.deepseek.com/v1/chat/completions",
-        "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-v4-flash"]
+        "base_url": "https://api.deepseek.com",
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"]
     },
     "openai": {
         "name": "OpenAI",
-        "base_url": "https://api.openai.com/v1/chat/completions",
+        "base_url": "https://api.openai.com/v1",
         "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo", "o1", "o1-mini", "o3-mini"]
     },
     "claude": {
         "name": "Claude (via API proxy)",
-        "base_url": "https://api.anthropic.com/v1/chat/completions",
+        "base_url": "https://api.anthropic.com/v1",
         "models": ["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-haiku-20240307", "claude-3-opus-20240229"]
     },
     "gemini": {
         "name": "Google Gemini (OpenAI 兼容)",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "models": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro"]
     },
     "qwen": {
         "name": "通义千问",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "models": ["qwen-max", "qwen-plus", "qwen-turbo", "qwen-long"]
     },
     "zhipu": {
         "name": "智谱 GLM",
-        "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "models": ["glm-4-plus", "glm-4", "glm-4-flash", "glm-4-long"]
     },
     "moonshot": {
         "name": "Moonshot / Kimi",
-        "base_url": "https://api.moonshot.cn/v1/chat/completions",
+        "base_url": "https://api.moonshot.cn/v1",
         "models": ["moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k"]
     },
     "custom": {
@@ -545,8 +545,7 @@ DOC_EXTENSIONS = {
     "txt", "md", "log", "json", "xml", "html", "csv",
     "py", "js", "ts", "java", "c", "cpp", "go", "rs", "sh",
     "yaml", "yml", "ini", "conf", "cfg", "toml",
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-    "rtf", "odt", "ods", "odp"
+    "pdf", "docx", "xlsx"
 }
 
 def _extract_text(filepath, ext):
@@ -614,7 +613,7 @@ def upload_doc():
         return jsonify({"error": "没有选择文件"}), 400
     ext = file.filename.rsplit(".", 1)[1].lower() if "." in file.filename else ""
     if ext and ext not in DOC_EXTENSIONS:
-        supported = "PDF、Word(.doc/.docx)、Excel(.xls/.xlsx)、PPT、CSV、TXT、Markdown、代码文件等"
+        supported = "PDF、Word(.docx)、Excel(.xlsx)、CSV、TXT、Markdown、代码文件"
         return jsonify({"error": f"不支持的文件格式: .{ext}，支持: {supported}"}), 400
     if not ext:
         ext = "txt"
@@ -799,17 +798,35 @@ def chat():
                 return
 
             history.append({"role": "assistant", "content": ""})
+            reasoning_buf = ""
+            in_reasoning = False
             for line in resp.iter_lines(decode_unicode=True):
                 if stream_state["cancel"].is_set():
                     break
-                content = parse_stream_chunk(line)
-                if content is None:
+                result = parse_stream_chunk_full(line)
+                if result is None:
                     break
-                if content:
-                    stream_state["full_reply"] += content
-                    history[-1]["content"] = stream_state["full_reply"]
-                    chunk_data = json.dumps({"chunk": content}, ensure_ascii=False)
+                c_text, r_text = result
+                if r_text:
+                    if not in_reasoning:
+                        in_reasoning = True
+                        rs_data = json.dumps({"reasoning_start": True}, ensure_ascii=False)
+                        yield f"data: {rs_data}\n\n"
+                    reasoning_buf += r_text
+                    chunk_data = json.dumps({"reasoning": r_text}, ensure_ascii=False)
                     yield f"data: {chunk_data}\n\n"
+                if c_text:
+                    if in_reasoning:
+                        in_reasoning = False
+                        re_data = json.dumps({"reasoning_end": True}, ensure_ascii=False)
+                        yield f"data: {re_data}\n\n"
+                    stream_state["full_reply"] += c_text
+                    history[-1]["content"] = stream_state["full_reply"]
+                    chunk_data = json.dumps({"chunk": c_text}, ensure_ascii=False)
+                    yield f"data: {chunk_data}\n\n"
+            if in_reasoning and not stream_state["full_reply"]:
+                stream_state["full_reply"] = reasoning_buf
+                history[-1]["content"] = stream_state["full_reply"]
 
             full_reply = stream_state["full_reply"]
             if callable_agents and re.search(r"\[CALL:\S+?\]", full_reply):
