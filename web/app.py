@@ -5,7 +5,14 @@ import json
 import uuid
 import time
 import threading
+import queue
 from flask import Flask, render_template, request, Response, jsonify, stream_with_context, send_from_directory
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 from chat_core import load_api_key, load_system_prompt, HistoryManager, send_chat_request, parse_stream_chunk, parse_stream_chunk_full, build_request_payload
 import requests
@@ -85,11 +92,12 @@ def _default_config():
     return {
         "base_url": BASE_URL,
         "api_key": "",
-        "key_file_path": KEY_FILE_PATH,
-        "model": MODEL,
+        "key_file_path": "",
+        "model": "",
         "provider": "deepseek",
         "max_history_rounds": MAX_HISTORY_ROUNDS,
         "max_context_size_kb": 0,
+        "web_search_count": 5,
         "custom_models": []
     }
 
@@ -105,11 +113,6 @@ def _load_config():
             if "_api_key" in saved and not cfg["api_key"]:
                 cfg["api_key"] = saved["_api_key"]
         except Exception:
-            pass
-    if not cfg["api_key"] and cfg["key_file_path"]:
-        try:
-            cfg["api_key"] = load_api_key(cfg["key_file_path"])
-        except RuntimeError:
             pass
     return cfg
 
@@ -171,6 +174,8 @@ def _save_conversations():
 def _allowed_file(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
+
+import web_search
 
 runtime_config = _load_config()
 agents_list = _load_agents()
@@ -324,7 +329,8 @@ def get_settings():
         "has_api_key": bool(runtime_config["api_key"]),
         "key_file_path": runtime_config["key_file_path"],
         "max_history_rounds": runtime_config["max_history_rounds"],
-        "max_context_size_kb": runtime_config.get("max_context_size_kb", 0)
+        "max_context_size_kb": runtime_config.get("max_context_size_kb", 0),
+        "web_search_count": runtime_config.get("web_search_count", 5)
     })
 
 
@@ -345,6 +351,12 @@ def update_settings():
     if "max_context_size_kb" in data:
         try:
             runtime_config["max_context_size_kb"] = int(data["max_context_size_kb"])
+        except (ValueError, TypeError):
+            pass
+    if "web_search_count" in data:
+        try:
+            n = int(data["web_search_count"])
+            runtime_config["web_search_count"] = max(3, min(10, n))
         except (ValueError, TypeError):
             pass
     if "api_key" in data and data["api_key"]:
@@ -721,6 +733,7 @@ def chat():
     cid = data.get("conversation_id", "")
     user_input = data.get("message", "").strip()
     images = data.get("images", [])
+    web_search_on = bool(data.get("web_search", False))
 
     if not user_input and not images:
         return jsonify({"error": "消息不能为空"}), 400
@@ -734,6 +747,8 @@ def chat():
 
     agent_id = conv.get("agent_id")
     chat_cfg = _get_chat_config(agent_id)
+    if not chat_cfg["model"]:
+        return jsonify({"error": "当前未选择模型，请先选择一个可用模型"}), 400
 
     history = conv["history"]
     mgr = HistoryManager(history, runtime_config["max_history_rounds"], "AI")
@@ -778,14 +793,90 @@ def chat():
             req_history.insert(0, {"role": "system", "content": callable_prompt.strip()})
         return req_history
 
-    stream_state = {"full_reply": "", "saved": False, "request_sent": False, "cancel": threading.Event(), "upstream_resp": None}
+    def _inject_search(req_history, search_result):
+        if not (search_result and search_result.get("context")):
+            return req_history
+        prompt = web_search.build_search_prompt(user_input, search_result)
+        if not prompt:
+            return req_history
+        new_hist = list(req_history)
+        last_user = next((i for i in range(len(new_hist) - 1, -1, -1)
+                          if new_hist[i]["role"] == "user"), -1)
+        if last_user >= 0:
+            new_hist[last_user] = dict(new_hist[last_user])
+            content = new_hist[last_user]["content"]
+            if isinstance(content, str):
+                new_hist[last_user]["content"] = prompt
+            elif isinstance(content, list):
+                blocks = list(content)
+                replaced = False
+                for j, b in enumerate(blocks):
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        nb = dict(b)
+                        nb["text"] = prompt
+                        blocks[j] = nb
+                        replaced = True
+                        break
+                if not replaced:
+                    blocks.insert(0, {"type": "text", "text": prompt})
+                new_hist[last_user]["content"] = blocks
+        return new_hist
+
+    stream_state = {"full_reply": "", "saved": False, "request_sent": False, "cancel": threading.Event(), "upstream_resp": None, "search_result": None}
+
+    def _llm_call(messages):
+        try:
+            url = chat_cfg["base_url"].rstrip("/") + "/chat/completions"
+            headers, payload = build_request_payload(
+                chat_cfg["api_key"], messages, chat_cfg["model"], temperature=0.3, stream=False
+            )
+            r = requests.post(url, json=payload, headers=headers, timeout=(10, 60))
+            if r.status_code != 200:
+                return ""
+            data = r.json()
+            return data["choices"][0]["message"].get("content", "") or ""
+        except Exception:
+            return ""
+
+    def _run_agentic_search(q_out):
+        try:
+            count = runtime_config.get("web_search_count", 5)
+            result = web_search.agentic_search(
+                user_input, _llm_call, max_results=count, max_rounds=2,
+                progress=lambda msg: q_out.put(("status", msg)),
+            )
+            q_out.put(("done", result))
+        except Exception:
+            q_out.put(("done", None))
 
     def generate():
         try:
+            search_result = None
+            if web_search_on and user_input:
+                q_out = queue.Queue()
+                worker = threading.Thread(target=_run_agentic_search, args=(q_out,), daemon=True)
+                worker.start()
+                while True:
+                    if stream_state["cancel"].is_set():
+                        break
+                    try:
+                        kind, val = q_out.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if kind == "status":
+                        st = json.dumps({"search_status": val}, ensure_ascii=False)
+                        yield f"data: {st}\n\n"
+                    elif kind == "done":
+                        search_result = val
+                        break
+                stream_state["search_result"] = search_result
+                if not (search_result and search_result.get("ok")):
+                    st = json.dumps({"search_status": "联网检索未获得有效结果，将基于已有知识回答"}, ensure_ascii=False)
+                    yield f"data: {st}\n\n"
             resp = send_chat_request(
                 chat_cfg["base_url"],
                 chat_cfg["api_key"],
-                _build_request_history(),
+                _inject_search(_build_request_history(), search_result),
                 chat_cfg["model"]
             )
             stream_state["upstream_resp"] = resp
@@ -838,6 +929,10 @@ def chat():
                 mgr._trim_history()
             else:
                 mgr._trim_history()
+            _sr = stream_state.get("search_result")
+            if _sr and _sr.get("sources"):
+                src_data = json.dumps({"sources": _sr["sources"]}, ensure_ascii=False)
+                yield f"data: {src_data}\n\n"
             stream_state["saved"] = True
             _save_conversations()
             yield "data: [DONE]\n\n"

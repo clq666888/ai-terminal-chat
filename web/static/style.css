@@ -574,6 +574,13 @@ body {
     margin-bottom: 8px;
 }
 
+.field-sublabel {
+    display: block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+}
+
 .setting-input,
 .setting-select {
     width: 100%;
@@ -1763,6 +1770,51 @@ body {
     flex-shrink: 0;
     transition: all 0.15s;
 }
+.btn-attach:hover {
+    background: var(--bg-hover, rgba(255,255,255,0.06));
+    color: var(--text-primary);
+}
+
+.btn-websearch.active {
+    color: #fff;
+    background: var(--accent, #4f8cff);
+}
+
+.search-status {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 4px 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.search-sources {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border, rgba(255,255,255,0.08));
+    font-size: 13px;
+}
+
+.search-sources .src-title {
+    color: var(--text-dim);
+    margin-bottom: 4px;
+}
+
+.search-sources a {
+    display: block;
+    color: var(--accent, #4f8cff);
+    text-decoration: none;
+    margin: 2px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.search-sources a:hover {
+    text-decoration: underline;
+}
+
 
 .btn-attach:hover {
     background: var(--bg-hover);

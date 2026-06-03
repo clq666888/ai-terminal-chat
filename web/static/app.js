@@ -61,8 +61,18 @@ const agentSlug = document.getElementById("agent-slug");
 const agentWhenToCall = document.getElementById("agent-when-to-call");
 
 const btnAttach = document.getElementById("btn-attach");
+const btnWebsearch = document.getElementById("btn-websearch");
 const imageFileInput = document.getElementById("image-file-input");
 const imagePreviewBar = document.getElementById("image-preview-bar");
+
+let webSearchOn = false;
+if (btnWebsearch) {
+    btnWebsearch.addEventListener("click", () => {
+        webSearchOn = !webSearchOn;
+        btnWebsearch.classList.toggle("active", webSearchOn);
+        showToast(webSearchOn ? "联网搜索已开启" : "联网搜索已关闭", "info");
+    });
+}
 
 let isGenerating = false;
 let currentAbort = null;
@@ -1186,6 +1196,9 @@ async function sendMessage() {
             renderPending = false;
             if (cursor.parentNode) cursor.remove();
             let html = "";
+            if (searchStatusText) {
+                html += '<div class="search-status">🌐 ' + escapeHtml(searchStatusText) + '</div>';
+            }
             if (reasoningText) {
                 const summary = isReasoning ? "思考中..." : "已深度思考";
                 html += '<details class="reasoning-block"' + (isReasoning ? ' open' : '') + '><summary>' + summary + '</summary><div class="reasoning-content">' + renderMarkdown(reasoningText) + '</div></details>';
@@ -1202,6 +1215,8 @@ async function sendMessage() {
     let fullText = "";
     let reasoningText = "";
     let isReasoning = false;
+    let searchStatusText = "";
+    let searchSources = [];
 
     let messageText = text;
     if (docs.length > 0) {
@@ -1211,6 +1226,9 @@ async function sendMessage() {
     const payload = { conversation_id: currentConvId, message: messageText };
     if (images.length > 0) {
         payload.images = images.map(img => img.base64);
+    }
+    if (webSearchOn) {
+        payload.web_search = true;
     }
 
     try {
@@ -1292,6 +1310,13 @@ async function sendMessage() {
                         fullText += parsed.chunk;
                         scheduleRender();
                     }
+                    if (parsed.search_status) {
+                        searchStatusText = parsed.search_status;
+                        scheduleRender();
+                    }
+                    if (parsed.sources) {
+                        searchSources = parsed.sources;
+                    }
                 } catch {
                     fullText += data;
                     scheduleRender();
@@ -1341,6 +1366,19 @@ async function sendMessage() {
             } else {
                 finalHtml += renderMarkdown(fullText);
             }
+        }
+        if (searchStatusText) {
+            finalHtml = '<div class="search-status">🌐 ' + escapeHtml(searchStatusText) + '</div>' + finalHtml;
+        }
+        if (searchSources && searchSources.length > 0) {
+            let srcHtml = '<div class="search-sources"><div class="src-title">参考来源</div>';
+            searchSources.forEach((src, i) => {
+                const u = String(src.url || "");
+                const ti = escapeHtml(String(src.title || u));
+                srcHtml += '<a href="' + escapeHtml(u) + '" target="_blank" rel="noopener">' + (i + 1) + '. ' + ti + '</a>';
+            });
+            srcHtml += '</div>';
+            finalHtml += srcHtml;
         }
         bubble.innerHTML = finalHtml;
         appendRetryButton(bubble.closest(".message"), text, false);
