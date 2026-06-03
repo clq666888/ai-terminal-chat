@@ -122,6 +122,28 @@ TOOLS_DEFINITION = [
                 "required": ["pattern"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user",
+            "description": "向用户提问以澄清需求。当你无法确定用户意图、需要在多个方案中做选择、或缺少关键信息时使用此工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "向用户提出的问题，应简洁明确"
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可选的选项列表，用户可以选择序号或自行输入。不提供则为开放式提问"
+                    }
+                },
+                "required": ["question"]
+            }
+        }
     }
 ]
 
@@ -134,9 +156,10 @@ DANGEROUS_COMMANDS = [
 
 
 class ToolExecutor:
-    def __init__(self, work_dir, auto_confirm=False):
+    def __init__(self, work_dir, auto_confirm=False, config=None):
         self.work_dir = os.path.abspath(work_dir)
         self.auto_confirm = auto_confirm
+        self.config = config or {}
 
     def _resolve_path(self, path):
         if os.path.isabs(path):
@@ -165,6 +188,7 @@ class ToolExecutor:
             "run_command": self._run_command,
             "list_dir": self._list_dir,
             "search_files": self._search_files,
+            "ask_user": self._ask_user,
         }.get(tool_name)
 
         if not handler:
@@ -172,10 +196,33 @@ class ToolExecutor:
 
         return handler(args)
 
+
+    def _ask_user(self, args):
+        question = args.get("question", "")
+        options = args.get("options", [])
+        print(f"\n❓ AI 提问: {question}")
+        if options:
+            for i, opt in enumerate(options, 1):
+                print(f"   {i}. {opt}")
+            print(f"   输入序号选择，或直接输入自定义回答")
+        try:
+            answer = input("   你的回答: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return "[用户跳过了提问]"
+        if not answer:
+            return "[用户未输入回答]"
+        if options and answer.isdigit():
+            idx = int(answer) - 1
+            if 0 <= idx < len(options):
+                chosen = options[idx]
+                print(f"   ✅ 已选择: {chosen}")
+                return f"用户选择了: {chosen}"
+        return f"用户回答: {answer}"
+
     def _read_file(self, args):
         path = self._resolve_path(args["path"])
         offset = args.get("offset", 1)
-        limit = args.get("limit", 200)
+        limit = args.get("limit", self.config.get("单次读取文件最大行数", 200))
         if not os.path.exists(path):
             return f"[错误] 文件不存在: {path}"
         if not os.path.isfile(path):
@@ -249,7 +296,7 @@ class ToolExecutor:
 
     def _run_command(self, args):
         command = args["command"]
-        timeout = args.get("timeout", 30)
+        timeout = args.get("timeout", self.config.get("命令执行超时秒数", 30))
 
         for dangerous in DANGEROUS_COMMANDS:
             if dangerous in command:
@@ -272,8 +319,8 @@ class ToolExecutor:
                 output += f"\n[退出码: {result.returncode}]"
             if not output.strip():
                 output = "[命令执行成功，无输出]"
-            if len(output) > 10000:
-                output = output[:10000] + "\n... (输出已截断)"
+            if len(output) > self.config.get("命令输出最大字符数", 10000):
+                output = output[:self.config.get("命令输出最大字符数", 10000)] + "\n... (输出已截断)"
             return output
         except subprocess.TimeoutExpired:
             return f"[错误] 命令超时 ({timeout}秒)"
@@ -295,7 +342,7 @@ class ToolExecutor:
                     dirs[:] = [d for d in dirs if not d.startswith(".")]
                     rel = os.path.relpath(root, path)
                     level = 0 if rel == "." else rel.count(os.sep) + 1
-                    if level > 4:
+                    if level > self.config.get("目录递归最大层级", 4):
                         continue
                     indent = "  " * level
                     dirname = os.path.basename(root) + "/" if rel != "." else "./"
@@ -344,19 +391,19 @@ class ToolExecutor:
                             if regex.search(line):
                                 rel = os.path.relpath(fpath, search_path)
                                 matches.append(f"{rel}:{line_num}: {line.rstrip()}")
-                                if len(matches) >= 50:
+                                if len(matches) >= self.config.get("搜索结果最大条数", 50):
                                     break
                 except (OSError, UnicodeDecodeError):
                     continue
-                if len(matches) >= 50:
+                if len(matches) >= self.config.get("搜索结果最大条数", 50):
                     break
-            if len(matches) >= 50:
+            if len(matches) >= self.config.get("搜索结果最大条数", 50):
                 break
 
         if not matches:
             return f"[无匹配] 在 {args.get('path', '.')} 中未找到 '{pattern}'"
 
         result = "\n".join(matches)
-        if len(matches) >= 50:
-            result += "\n... 结果已截断，仅显示前 50 条匹配"
+        if len(matches) >= self.config.get("搜索结果最大条数", 50):
+            result += f"\n... 结果已截断，仅显示前 {self.config.get('搜索结果最大条数', 50)} 条匹配"
         return result

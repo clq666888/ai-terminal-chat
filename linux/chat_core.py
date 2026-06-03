@@ -118,10 +118,10 @@ def _normalize_base_url(base_url):
     return url
 
 
-def send_chat_request(base_url, api_key, messages, model, temperature=0.7, tools=None, stream=True):
+def send_chat_request(base_url, api_key, messages, model, temperature=0.7, tools=None, stream=True, connect_timeout=10, read_timeout=120):
     url = _normalize_base_url(base_url)
     headers, payload = build_request_payload(api_key, messages, model, temperature, stream=stream, tools=tools)
     if stream:
-        return requests.post(url, json=payload, headers=headers, stream=True, timeout=(10, 120))
+        return requests.post(url, json=payload, headers=headers, stream=True, timeout=(connect_timeout, read_timeout))
     else:
-        return requests.post(url, json=payload, headers=headers, timeout=(10, 120))
+        return requests.post(url, json=payload, headers=headers, timeout=(connect_timeout, read_timeout))

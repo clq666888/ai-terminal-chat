@@ -15,9 +15,17 @@ from agent_manager import (
     filter_tools, print_agent_list
 )
 
+import sys as _sys
+_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _parent not in _sys.path:
+    _sys.path.insert(0, _parent)
+from config_manager import load_config
+
+_cfg = load_config()
+
 WORK_DIR = os.getcwd()
-MAX_HISTORY_ROUNDS = 50
-MAX_TOOL_ROUNDS = 20
+MAX_HISTORY_ROUNDS = _cfg["最大记忆轮数"]
+MAX_TOOL_ROUNDS = _cfg["最大工具调用轮数"]
 
 TOOL_RULES = """
 
@@ -32,6 +40,7 @@ TOOL_RULES = """
 3. 写入文件时给出完整内容，不要省略
 4. 当用户只是聊天、提问、讨论时，直接回答即可，不需要调用工具
 5. 不要在回复中暴露 API Key、密码等敏感信息
+6. 当你需要向用户提问、确认方案、或获取补充信息时，必须调用 ask_user 工具，禁止在回复文本中直接写问题等待用户回答。ask_user 的结果会立即返回给你，你可以基于用户的回答继续执行后续操作，整个过程不会中断当前任务
 6. 当前运行环境是 Windows，执行命令时使用 Windows 语法"""
 
 TOOL_DESC_MAP = {
@@ -40,6 +49,7 @@ TOOL_DESC_MAP = {
     "run_command": "执行命令",
     "list_dir": "列出目录结构",
     "search_files": "在文件中搜索文本",
+    "ask_user": "向用户提问澄清需求",
 }
 
 TOOL_DISPLAY_MAP = {
@@ -48,6 +58,7 @@ TOOL_DISPLAY_MAP = {
     "run_command": "执行命令",
     "list_dir": "列出目录",
     "search_files": "搜索文件",
+    "ask_user": "用户提问",
 }
 
 os.system("chcp 65001 >nul 2>&1")
@@ -75,7 +86,7 @@ if not global_agent["model"]:
 
 AI_NAME = global_agent["name"]
 
-tool_executor = ToolExecutor(WORK_DIR)
+tool_executor = ToolExecutor(WORK_DIR, config=_cfg)
 
 current_agent = None
 current_history = []
@@ -167,6 +178,9 @@ def format_tool_log(func_name, func_args):
         pattern = args.get("pattern", "?")
         path = args.get("path", ".")
         return f"  🔍 搜索: '{pattern}' @ {path}"
+    elif func_name == "ask_user":
+        question = args.get("question", "?")
+        return f"  ❓ 提问: {question}"
     else:
         return f"  🔧 {func_name}"
 
@@ -179,7 +193,8 @@ def chat(user_input):
         try:
             resp = send_chat_request(
                 current_api_url, current_api_key, current_history, current_model,
-                temperature=current_temperature, tools=current_tools, stream=False
+                temperature=current_temperature, tools=current_tools, stream=False,
+                connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"]
             )
         except requests.RequestException as e:
             print(f"\n❌ 网络请求异常: {e}")
@@ -221,14 +236,33 @@ def chat(user_input):
 
             continue
 
-        final_text = message.get("content", "")
-        if final_text:
-            print(f"\n{AI_NAME}: {final_text}")
-            mgr.save_assistant_reply(final_text)
-        return final_text
+        break
+    else:
+        print("\n⚠️ 达到最大工具调用轮数，停止执行")
+        return None
 
-    print("\n⚠️ 达到最大工具调用轮数，停止执行")
-    return None
+    try:
+        stream_resp = send_chat_request(
+            current_api_url, current_api_key, current_history, current_model,
+            temperature=current_temperature, tools=None, stream=True,
+            connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"]
+        )
+    except requests.RequestException as e:
+        print(f"\n❌ 流式请求异常: {e}")
+        return None
+
+    if stream_resp.status_code != 200:
+        print(f"\n❌ 请求失败 [{stream_resp.status_code}]: {stream_resp.text}")
+        return None
+
+    with TerminalManager():
+        final_text = stream_output(stream_resp, AI_NAME)
+
+    if final_text:
+        mgr.save_assistant_reply(final_text)
+    else:
+        mgr.add_interrupt_hint()
+    return final_text
 
 
 def main():
@@ -246,7 +280,7 @@ def main():
         ids = ", ".join(f"@{a['id']}" for a in other_agents)
         print(f"🧩 可用智能体: {ids}")
     print("─" * 50)
-    print("输入 exit 退出 | clear 清空记忆 | agents 列表 | @名称 切换\n")
+    print("输入 /exit 退出 | /clear 清空 | /reload 重载配置 | /agents 列表 | @名称 切换\n")
 
     if len(sys.argv) > 1:
         user_input = " ".join(sys.argv[1:])
@@ -263,16 +297,40 @@ def main():
             print("\n再见！")
             break
 
-        if user_text.lower() == "exit":
+        if user_text.lower() == "/exit":
             print("对话结束")
             break
 
-        if user_text.lower() == "clear":
+        if user_text.lower() == "/clear":
             switch_agent(current_agent["id"] if current_agent else None)
             print("📝 记忆已清空\n")
             continue
 
-        if user_text.lower() == "agents":
+        if user_text.lower() == "/reload":
+            _cfg.update(load_config())
+            tool_executor.config = _cfg
+            MAX_HISTORY_ROUNDS = _cfg["最大记忆轮数"]
+            MAX_TOOL_ROUNDS = _cfg["最大工具调用轮数"]
+            print("🔄 配置已重新加载")
+            for key, val in _cfg.items():
+                print(f"   [{key}] = {val}")
+            agent_id = current_agent["id"] if current_agent else None
+            if agent_id and agent_id != "global":
+                refreshed = get_agent(agent_id)
+                if refreshed:
+                    current_agent.update(refreshed)
+                    print(f"🔄 智能体 @{agent_id} 配置已重载")
+            else:
+                refreshed_global = get_global_agent()
+                if refreshed_global:
+                    global_agent.update(refreshed_global)
+                    current_agent.update(refreshed_global)
+                    print("🔄 全局智能体配置已重载")
+            switch_agent(agent_id)
+            print()
+            continue
+
+        if user_text.lower() == "/agents":
             agents = list_agents()
             if agents:
                 cid = current_agent["id"] if current_agent else "global"

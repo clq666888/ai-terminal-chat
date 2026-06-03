@@ -158,4 +158,4 @@ def print_agent_list(agents, current_id=None):
         if a["when_to_call"]:
             print(f"     用途: {a['when_to_call']}")
     print("─" * 40)
-    print("  切换: @标识名 | 列表: agents | 返回: 回车")
+    print("  切换: @标识名 | 列表: /agents | 返回: 回车")
