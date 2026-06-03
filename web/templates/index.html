@@ -29,6 +29,8 @@
         </div>
     </aside>
 
+    <div class="sidebar-resizer" id="sidebar-resizer" title="拖动调整宽度"></div>
+
     <div class="main">
         <header class="header">
             <button class="btn-toggle-sidebar" id="btn-toggle-sidebar" title="菜单">
@@ -115,7 +117,13 @@
             <div class="footer-bar">
                 <div class="model-bar" id="model-bar">
                     <select id="quick-model" class="quick-model-select"></select>
-                    <button class="btn-manage-models" id="btn-manage-models" title="管理模型列表">+</button>
+                    <button class="btn-manage-models" id="btn-open-model-manager" title="管理模型">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"></path>
+                        </svg>
+                    </button>
+                    <button class="btn-manage-models" id="btn-manage-models" title="新增模型">+</button>
                 </div>
             </div>
         </footer>
@@ -148,7 +156,7 @@
     <div class="model-manage-overlay" id="model-manage-overlay">
         <div class="model-manage-panel">
             <div class="settings-header">
-                <h2>模型与 API 配置</h2>
+                <h2 id="model-config-title">新增模型</h2>
                 <button class="btn-close-settings" id="btn-close-manage">✕</button>
             </div>
             <div class="settings-body">
@@ -167,14 +175,23 @@
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">API Key</label>
-                    <div class="setting-hint">直接输入 Key，或填写服务器上的 Key 文件路径（二选一）</div>
                     <input type="password" id="set-api-key" class="setting-input" placeholder="sk-xxxxxxxxxxxx">
-                    <input type="text" id="set-key-file" class="setting-input" placeholder="Key 文件路径，如 /home/user/apikey.txt" style="margin-top:8px;">
                     <div class="key-status" id="key-status"></div>
                 </div>
                 <div class="setting-group">
                     <button class="btn-save-settings" id="btn-save-api-config" style="width:100%;">保存配置</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="model-manage-overlay" id="model-list-overlay">
+        <div class="model-manage-panel">
+            <div class="settings-header">
+                <h2>管理模型</h2>
+                <button class="btn-close-settings" id="btn-close-model-list">✕</button>
+            </div>
+            <div class="settings-body">
                 <div class="setting-group">
                     <label class="setting-label">已保存的模型</label>
                     <div id="custom-model-list" class="custom-model-list scrollable-list"></div>
@@ -261,6 +278,17 @@
         </div>
     </div>
 
+    <div class="confirm-overlay" id="confirm-overlay">
+        <div class="confirm-dialog">
+            <div class="confirm-icon" id="confirm-icon">⚠️</div>
+            <h3 class="confirm-title" id="confirm-title">确认操作</h3>
+            <p class="confirm-message" id="confirm-message"></p>
+            <div class="confirm-actions">
+                <button class="confirm-btn confirm-cancel" id="confirm-cancel">取消</button>
+                <button class="confirm-btn confirm-ok" id="confirm-ok">确定</button>
+            </div>
+        </div>
+    </div>
     <script src="/static/marked.min.js?v={{ cache_version }}"></script>
     <script src="/static/app.js?v={{ cache_version }}"></script>
 </body>

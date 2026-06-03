@@ -22,13 +22,13 @@ import io
 
 # ==================== 配置区 ====================
 BASE_URL = "https://api.deepseek.com"
-KEY_FILE_PATH = "/home/sti/apikey.txt"
-MODEL = "deepseek-v4-flash"
+MODEL = ""
 AI_NAME = "AI Chat"
 MAX_HISTORY_ROUNDS = 50
 HOST = "0.0.0.0"
 PORT = 8080
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+APIKEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".apikey")
 AGENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.json")
 CONVERSATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conversations.json")
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "uploads")
@@ -92,7 +92,7 @@ def _default_config():
     return {
         "base_url": BASE_URL,
         "api_key": "",
-        "key_file_path": "",
+        "api_keys": {},
         "model": "",
         "provider": "deepseek",
         "max_history_rounds": MAX_HISTORY_ROUNDS,
@@ -110,22 +110,60 @@ def _load_config():
             for k in cfg:
                 if k in saved:
                     cfg[k] = saved[k]
-            if "_api_key" in saved and not cfg["api_key"]:
-                cfg["api_key"] = saved["_api_key"]
         except Exception:
             pass
+    cfg["api_keys"] = _load_api_keys()
+    cfg["api_key"] = cfg["api_keys"].get(cfg["provider"], "")
     return cfg
+
+
+def _load_api_keys():
+    keys = {}
+    if os.path.exists(APIKEY_FILE):
+        try:
+            with open(APIKEY_FILE, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+            if raw:
+                if raw.startswith("{"):
+                    keys = json.loads(raw)
+                else:
+                    keys["deepseek"] = raw
+        except Exception:
+            pass
+    return keys if isinstance(keys, dict) else {}
+
+
+def _save_api_keys(keys):
+    try:
+        with open(APIKEY_FILE, "w", encoding="utf-8") as f:
+            json.dump(keys or {}, f, ensure_ascii=False, indent=2)
+        try:
+            os.chmod(APIKEY_FILE, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _get_key_for(provider):
+    return runtime_config.get("api_keys", {}).get(provider, "")
+
+
+def _set_key_for(provider, key):
+    if "api_keys" not in runtime_config or not isinstance(runtime_config["api_keys"], dict):
+        runtime_config["api_keys"] = {}
+    runtime_config["api_keys"][provider] = (key or "").strip()
+    _save_api_keys(runtime_config["api_keys"])
+    if provider == runtime_config.get("provider"):
+        runtime_config["api_key"] = runtime_config["api_keys"][provider]
 
 
 def _save_config(cfg):
     save_data = {}
     for k, v in cfg.items():
-        if k == "api_key":
+        if k in ("api_key", "api_keys"):
             continue
         save_data[k] = v
-    if cfg.get("api_key") and not cfg.get("key_file_path"):
-        save_data["api_key_masked"] = cfg["api_key"][:8] + "***"
-        save_data["_api_key"] = cfg["api_key"]
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -210,12 +248,12 @@ def _get_chat_config(agent_id=None):
         return {
             "base_url": base_url,
             "model": agent["model"],
-            "api_key": runtime_config["api_key"]
+            "api_key": _get_key_for(provider)
         }
     return {
         "base_url": runtime_config["base_url"],
         "model": runtime_config["model"],
-        "api_key": runtime_config["api_key"]
+        "api_key": _get_key_for(runtime_config["provider"])
     }
 
 
@@ -320,14 +358,19 @@ def get_providers():
     return jsonify(result)
 
 
+@app.route("/api/provider-key-status", methods=["GET"])
+def provider_key_status():
+    provider = request.args.get("provider", "").strip()
+    return jsonify({"has_api_key": bool(_get_key_for(provider)) if provider else False})
+
+
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     return jsonify({
         "provider": runtime_config["provider"],
         "base_url": runtime_config["base_url"],
         "model": runtime_config["model"],
-        "has_api_key": bool(runtime_config["api_key"]),
-        "key_file_path": runtime_config["key_file_path"],
+        "has_api_key": bool(_get_key_for(runtime_config["provider"])),
         "max_history_rounds": runtime_config["max_history_rounds"],
         "max_context_size_kb": runtime_config.get("max_context_size_kb", 0),
         "web_search_count": runtime_config.get("web_search_count", 5)
@@ -360,15 +403,8 @@ def update_settings():
         except (ValueError, TypeError):
             pass
     if "api_key" in data and data["api_key"]:
-        runtime_config["api_key"] = data["api_key"].strip()
-        runtime_config["key_file_path"] = ""
-    if "key_file_path" in data and data["key_file_path"]:
-        path = data["key_file_path"].strip()
-        try:
-            runtime_config["api_key"] = load_api_key(path)
-            runtime_config["key_file_path"] = path
-        except RuntimeError as e:
-            return jsonify({"error": str(e)}), 400
+        target_provider = data.get("provider") or runtime_config["provider"]
+        _set_key_for(target_provider, data["api_key"])
     _save_config(runtime_config)
     return jsonify({"status": "ok"})
 
@@ -382,6 +418,7 @@ def switch_model():
     if provider and model:
         runtime_config["provider"] = provider
         runtime_config["model"] = model
+        runtime_config["api_key"] = _get_key_for(provider)
         if base_url:
             runtime_config["base_url"] = base_url
         else:

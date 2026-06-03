@@ -7,3 +7,4 @@ web/conversations.json
 web/.polyai.pid
 web/.polyai.log
 web/static/uploads/
+web/.apikey

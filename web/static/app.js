@@ -18,7 +18,6 @@ const setMaxRounds = document.getElementById("set-max-rounds");
 const setMaxContextSize = document.getElementById("set-max-context-size");
 const setBaseUrl = document.getElementById("set-base-url");
 const setApiKey = document.getElementById("set-api-key");
-const setKeyFile = document.getElementById("set-key-file");
 const keyStatus = document.getElementById("key-status");
 const quickModel = document.getElementById("quick-model");
 
@@ -26,6 +25,10 @@ const btnManageModels = document.getElementById("btn-manage-models");
 const modelManageOverlay = document.getElementById("model-manage-overlay");
 const btnCloseManage = document.getElementById("btn-close-manage");
 const customModelListEl = document.getElementById("custom-model-list");
+const btnOpenModelManager = document.getElementById("btn-open-model-manager");
+const modelListOverlay = document.getElementById("model-list-overlay");
+const btnCloseModelList = document.getElementById("btn-close-model-list");
+const modelConfigTitle = document.getElementById("model-config-title");
 const addProvider = document.getElementById("add-provider");
 const addModel = document.getElementById("add-model");
 const addModelCustom = document.getElementById("add-model-custom");
@@ -122,6 +125,9 @@ quickModel.addEventListener("change", onQuickModelChange);
 btnManageModels.addEventListener("click", openManageModels);
 btnCloseManage.addEventListener("click", closeManageModels);
 modelManageOverlay.addEventListener("click", e => { if (e.target === modelManageOverlay) closeManageModels(); });
+btnOpenModelManager.addEventListener("click", openModelList);
+btnCloseModelList.addEventListener("click", closeModelList);
+modelListOverlay.addEventListener("click", e => { if (e.target === modelListOverlay) closeModelList(); });
 addProvider.addEventListener("change", onAddProviderChange);
 addModel.addEventListener("change", () => {
     if (addModel.value === "__custom__") { addModelCustom.style.display = "block"; addModelCustom.focus(); }
@@ -362,6 +368,16 @@ async function loadProviders() {
     providers = await resp.json();
 }
 
+function providerEntriesCustomFirst() {
+    const entries = Object.entries(providers);
+    entries.sort((a, b) => {
+        if (a[0] === "custom") return -1;
+        if (b[0] === "custom") return 1;
+        return 0;
+    });
+    return entries;
+}
+
 // ==================== 智能体下拉选择器 ====================
 function toggleAgentDropdown() {
     if (agentSelector.classList.contains("open")) {
@@ -546,7 +562,7 @@ async function showAgentForm(agent) {
     }
 
     agentProvider.innerHTML = '<option value="">使用全局模型</option>';
-    for (const [key, val] of Object.entries(providers)) {
+    for (const [key, val] of providerEntriesCustomFirst()) {
         const opt = document.createElement("option");
         opt.value = key;
         opt.textContent = val.name;
@@ -716,33 +732,36 @@ async function onQuickModelChange() {
 async function openManageModels() {
     if (Object.keys(providers).length === 0) await loadProviders();
     addProvider.innerHTML = "";
-    for (const [key, val] of Object.entries(providers)) {
+    for (const [key, val] of providerEntriesCustomFirst()) {
         const opt = document.createElement("option");
         opt.value = key;
         opt.textContent = val.name;
         addProvider.appendChild(opt);
     }
-    const resp = await fetch("/api/settings");
-    const cfg = resp.ok ? await resp.json() : {};
-    addProvider.value = cfg.provider || "deepseek";
-    onAddProviderChange();
-    setBaseUrl.value = cfg.base_url || "";
-    setApiKey.value = "";
-    setKeyFile.value = cfg.key_file_path || "";
-    if (cfg.model) {
-        if (addModel.querySelector('option[value="' + cfg.model + '"]')) {
-            addModel.value = cfg.model;
-        }
-    }
-    keyStatus.textContent = cfg.has_api_key ? "✓ 已配置 API Key" : "✗ 未配置 API Key";
-    keyStatus.className = "key-status " + (cfg.has_api_key ? "ok" : "no");
-    await renderCustomModelList();
+    addProvider.value = providers["deepseek"] ? "deepseek" : (addProvider.options.length ? addProvider.options[0].value : "deepseek");
+    btnSaveApiConfig.dataset.editingKey = "";
+    btnSaveApiConfig.textContent = "保存配置";
+    modelConfigTitle.textContent = "新增模型";
+    await onAddProviderChange();
     modelManageOverlay.classList.add("active");
 }
 
-function closeManageModels() { modelManageOverlay.classList.remove("active"); }
+async function closeManageModels() {
+    modelManageOverlay.classList.remove("active");
+    if (btnSaveApiConfig.dataset.fromList === "1") {
+        btnSaveApiConfig.dataset.fromList = "";
+        await openModelList();
+    }
+}
 
-function onAddProviderChange() {
+async function openModelList() {
+    await renderCustomModelList();
+    modelListOverlay.classList.add("active");
+}
+
+function closeModelList() { modelListOverlay.classList.remove("active"); }
+
+async function onAddProviderChange() {
     const key = addProvider.value;
     const p = providers[key];
     if (!p) return;
@@ -762,6 +781,16 @@ function onAddProviderChange() {
     addModel.appendChild(customOpt);
     addModelCustom.style.display = "none";
     addModelCustom.value = "";
+    setApiKey.value = "";
+    try {
+        const r = await fetch("/api/provider-key-status?provider=" + encodeURIComponent(key));
+        const d = r.ok ? await r.json() : { has_api_key: false };
+        keyStatus.textContent = d.has_api_key ? "\u2713 \u5df2\u914d\u7f6e API Key\uff08\u53ef\u4e0d\u586b\uff0c\u7559\u7a7a\u5219\u6cbf\u7528\uff09" : "\u2717 \u672a\u914d\u7f6e API Key";
+        keyStatus.className = "key-status " + (d.has_api_key ? "ok" : "no");
+    } catch (e) {
+        keyStatus.textContent = "\u2717 \u672a\u914d\u7f6e API Key";
+        keyStatus.className = "key-status no";
+    }
 }
 
 async function renderCustomModelList() {
@@ -787,9 +816,12 @@ async function renderCustomModelList() {
             '<button class="btn-edit-model" title="编辑">✎</button>' +
             '<button class="btn-remove-model" title="删除">✕</button>' +
             '</div>';
-        item.querySelector(".btn-edit-model").addEventListener("click", () => {
+        item.querySelector(".btn-edit-model").addEventListener("click", async () => {
+            closeModelList();
+            await openManageModels();
+            btnSaveApiConfig.dataset.fromList = "1";
             addProvider.value = m.provider;
-            onAddProviderChange();
+            await onAddProviderChange();
             setBaseUrl.value = m.base_url || "";
             if (addModel.querySelector('option[value="' + m.model + '"]')) {
                 addModel.value = m.model;
@@ -801,8 +833,11 @@ async function renderCustomModelList() {
             }
             btnSaveApiConfig.dataset.editingKey = m.provider + "|" + m.model;
             btnSaveApiConfig.textContent = "保存修改";
+            modelConfigTitle.textContent = "编辑模型";
         });
         item.querySelector(".btn-remove-model").addEventListener("click", async () => {
+            const ok = await confirmDialog("确定要删除模型「" + (m.name || m.model) + "」吗？此操作不可恢复。", { title: "删除模型", icon: "\u{1F5D1}\uFE0F", okText: "删除" });
+            if (!ok) return;
             await fetch("/api/custom-models", {
                 method: "DELETE",
                 headers: { "Content-Type": "application/json" },
@@ -828,9 +863,7 @@ async function saveApiConfig() {
     if (!model) { showToast("请选择或输入模型名称", "error"); return; }
     const payload = { provider, base_url, model };
     const apiKeyVal = setApiKey.value.trim();
-    const keyFileVal = setKeyFile.value.trim();
     if (apiKeyVal) payload.api_key = apiKeyVal;
-    if (keyFileVal) payload.key_file_path = keyFileVal;
     try {
         const settingsResp = await fetch("/api/settings", {
             method: "PUT",
@@ -862,12 +895,14 @@ async function saveApiConfig() {
             });
         }
         showToast("配置已保存", "success");
-        if (apiKeyVal || keyFileVal) {
+        if (apiKeyVal) {
             keyStatus.textContent = "✓ 已配置 API Key";
             keyStatus.className = "key-status ok";
         }
-        await renderCustomModelList();
         await buildQuickModelList();
+        btnSaveApiConfig.dataset.fromList = "";
+        modelManageOverlay.classList.remove("active");
+        await openModelList();
     } catch (err) {
         showToast("保存失败: " + err.message, "error");
     }
@@ -1170,6 +1205,25 @@ async function sendMessage() {
         return;
     }
 
+    if (!quickModel.value) {
+        showToast("未选择模型，请先在右下角选择一个可用模型", "error");
+        return;
+    }
+    try {
+        const sResp = await fetch("/api/settings");
+        if (sResp.ok) {
+            const sCfg = await sResp.json();
+            if (!sCfg.model) {
+                showToast("未选择模型，请先在右下角选择一个可用模型", "error");
+                return;
+            }
+            if (!sCfg.has_api_key) {
+                showToast("未配置 API Key，请先在设置中配置", "error");
+                return;
+            }
+        }
+    } catch (e) {}
+
     if (!currentConvId) {
         await createNewConversation();
     }
@@ -1423,6 +1477,44 @@ async function saveSettings() {
 }
 
 // ==================== 工具函数 ====================
+function confirmDialog(message, opts) {
+    opts = opts || {};
+    return new Promise(resolve => {
+        const overlay = document.getElementById("confirm-overlay");
+        const titleEl = document.getElementById("confirm-title");
+        const msgEl = document.getElementById("confirm-message");
+        const iconEl = document.getElementById("confirm-icon");
+        const okBtn = document.getElementById("confirm-ok");
+        const cancelBtn = document.getElementById("confirm-cancel");
+        titleEl.textContent = opts.title || "确认操作";
+        msgEl.textContent = message || "";
+        iconEl.textContent = opts.icon || "\u26A0\uFE0F";
+        okBtn.textContent = opts.okText || "确定";
+        cancelBtn.textContent = opts.cancelText || "取消";
+        function cleanup(result) {
+            overlay.classList.remove("active");
+            okBtn.removeEventListener("click", onOk);
+            cancelBtn.removeEventListener("click", onCancel);
+            overlay.removeEventListener("click", onBackdrop);
+            document.removeEventListener("keydown", onKey);
+            resolve(result);
+        }
+        function onOk() { cleanup(true); }
+        function onCancel() { cleanup(false); }
+        function onBackdrop(e) { if (e.target === overlay) cleanup(false); }
+        function onKey(e) {
+            if (e.key === "Escape") cleanup(false);
+            else if (e.key === "Enter") cleanup(true);
+        }
+        okBtn.addEventListener("click", onOk);
+        cancelBtn.addEventListener("click", onCancel);
+        overlay.addEventListener("click", onBackdrop);
+        document.addEventListener("keydown", onKey);
+        overlay.classList.add("active");
+        okBtn.focus();
+    });
+}
+
 function showToast(msg, type) {
     const existing = document.querySelector(".toast");
     if (existing) existing.remove();
@@ -1485,4 +1577,61 @@ function renderCallBlocks(text) {
 loadConversations();
 buildQuickModelList();
 loadAgentBar();
+
+// ==================== 侧边栏宽度拖拽 ====================
+(function setupSidebarResizer() {
+    const resizer = document.getElementById("sidebar-resizer");
+    if (!resizer) return;
+    const MIN_W = 180;
+    const MAX_W = 480;
+
+    const saved = parseInt(localStorage.getItem("sidebarWidth") || "", 10);
+    if (!isNaN(saved) && saved >= MIN_W && saved <= MAX_W) {
+        document.documentElement.style.setProperty("--sidebar-width", saved + "px");
+    }
+
+    let dragging = false;
+
+    function onMove(e) {
+        if (!dragging) return;
+        const x = e.touches ? e.touches[0].clientX : e.clientX;
+        let w = x;
+        if (w < MIN_W) w = MIN_W;
+        if (w > MAX_W) w = MAX_W;
+        document.documentElement.style.setProperty("--sidebar-width", w + "px");
+    }
+
+    function onUp() {
+        if (!dragging) return;
+        dragging = false;
+        document.body.classList.remove("resizing");
+        resizer.classList.remove("dragging");
+        const cur = getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width").trim();
+        const px = parseInt(cur, 10);
+        if (!isNaN(px)) localStorage.setItem("sidebarWidth", String(px));
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("touchmove", onMove);
+        window.removeEventListener("touchend", onUp);
+    }
+
+    function onDown(e) {
+        if (sidebar.classList.contains("collapsed")) return;
+        dragging = true;
+        document.body.classList.add("resizing");
+        resizer.classList.add("dragging");
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        window.addEventListener("touchmove", onMove, { passive: false });
+        window.addEventListener("touchend", onUp);
+        e.preventDefault();
+    }
+
+    resizer.addEventListener("mousedown", onDown);
+    resizer.addEventListener("touchstart", onDown, { passive: false });
+    resizer.addEventListener("dblclick", function () {
+        document.documentElement.style.setProperty("--sidebar-width", "260px");
+        localStorage.setItem("sidebarWidth", "260");
+    });
+})();
 
