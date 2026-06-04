@@ -126,6 +126,27 @@ TOOLS_DEFINITION = [
     {
         "type": "function",
         "function": {
+            "name": "call_agent",
+            "description": "调用另一个智能体执行子任务。被调用的智能体会独立完成任务并返回结果。适用于需要其他专业智能体协作的场景。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "要调用的智能体标识名（如 coder、code-reviewer）"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "发送给目标智能体的任务描述或指令"
+                    }
+                },
+                "required": ["agent_id", "message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_user",
             "description": "向用户提问以澄清需求。当你无法确定用户意图、需要在多个方案中做选择、或缺少关键信息时使用此工具。",
             "parameters": {

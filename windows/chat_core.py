@@ -81,6 +81,89 @@ class HistoryManager:
         self.history.clear()
         self.history.extend(sys_msgs + non_sys)
 
+    def count_rounds(self):
+        count = 0
+        for msg in self.history:
+            if msg["role"] == "user":
+                count += 1
+        return count
+
+    def needs_compression(self, threshold):
+        if threshold <= 0:
+            return False
+        return self.count_rounds() >= threshold
+
+    def compress_history(self, api_url, api_key, model, keep_recent=10, connect_timeout=10, read_timeout=120):
+        if not self.history or self.history[0]["role"] != "system":
+            return False, "no system message"
+
+        sys_msg = self.history[0]
+        non_sys = self.history[1:]
+
+        user_indices = [i for i, m in enumerate(non_sys) if m["role"] == "user"]
+        if len(user_indices) <= keep_recent:
+            return False, "not enough rounds"
+
+        split_idx = user_indices[-keep_recent]
+        old_msgs = non_sys[:split_idx]
+        recent_msgs = non_sys[split_idx:]
+
+        if not old_msgs:
+            return False, "nothing to compress"
+
+        summary_prompt = self._build_summary_prompt(old_msgs)
+
+        try:
+            resp = send_chat_request(
+                api_url, api_key,
+                [{"role": "user", "content": summary_prompt}],
+                model, temperature=0.3, tools=None, stream=False,
+                connect_timeout=connect_timeout, read_timeout=read_timeout
+            )
+        except Exception as e:
+            return False, f"request failed: {e}"
+
+        if resp.status_code != 200:
+            return False, f"status {resp.status_code}"
+
+        data = resp.json()
+        summary = data["choices"][0]["message"].get("content", "")
+        if not summary:
+            return False, "empty summary"
+
+        summary_block = f"\n\n[历史对话摘要]\n{summary}"
+        sys_msg["content"] = sys_msg["content"] + summary_block
+
+        self.history.clear()
+        self.history.append(sys_msg)
+        self.history.extend(recent_msgs)
+
+        return True, summary
+
+    def _build_summary_prompt(self, messages):
+        lines = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content", "")
+            if role == "user":
+                lines.append(f"用户: {content}")
+            elif role == "assistant":
+                if content:
+                    lines.append(f"AI: {content}")
+                if msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        fname = tc["function"]["name"]
+                        lines.append(f"AI调用工具: {fname}")
+            elif role == "tool":
+                short = content[:200] + "..." if len(content) > 200 else content
+                lines.append(f"工具结果: {short}")
+        conversation = "\n".join(lines)
+        return (
+            "请将以下对话历史压缩为一段简洁的摘要，保留关键信息（用户意图、重要决策、文件操作结果、关键结论）。"
+            "摘要应该让后续对话能理解之前发生了什么，但不需要逐条复述。用中文输出，不超过500字。\n\n"
+            f"{conversation}"
+        )
+
     def add_interrupt_hint(self):
         self.history.append({
             "role": "system",

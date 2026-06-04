@@ -22,11 +22,18 @@ if _parent not in _sys.path:
     _sys.path.insert(0, _parent)
 from config_manager import load_config
 
+_mcp_dir = os.path.join(_parent, "mcp")
+if _mcp_dir not in _sys.path:
+    _sys.path.insert(0, _mcp_dir)
+from mcp_client import get_mcp_manager
+
 _cfg = load_config()
 
 WORK_DIR = os.getcwd()
 MAX_HISTORY_ROUNDS = _cfg["最大记忆轮数"]
 MAX_TOOL_ROUNDS = _cfg["最大工具调用轮数"]
+COMPRESS_THRESHOLD = _cfg["历史压缩阈值轮数"]
+COMPRESS_KEEP_RECENT = _cfg["压缩保留最近轮数"]
 
 TOOL_RULES = """
 
@@ -49,6 +56,7 @@ TOOL_DESC_MAP = {
     "run_command": "执行 shell 命令",
     "list_dir": "列出目录结构",
     "search_files": "在文件中搜索文本",
+    "call_agent": "调用其他智能体执行子任务",
     "ask_user": "向用户提问澄清需求",
 }
 
@@ -58,6 +66,7 @@ TOOL_DISPLAY_MAP = {
     "run_command": "执行命令",
     "list_dir": "列出目录",
     "search_files": "搜索文件",
+    "call_agent": "调用智能体",
     "ask_user": "用户提问",
 }
 
@@ -86,9 +95,14 @@ AI_NAME = global_agent["name"]
 
 tool_executor = ToolExecutor(WORK_DIR, config=_cfg)
 
+mcp_mgr = get_mcp_manager()
+mcp_mgr.load_servers()
+
+ALL_TOOLS = TOOLS_DEFINITION + mcp_mgr.get_tools_definition()
+
 current_agent = None
 current_history = []
-current_tools = TOOLS_DEFINITION
+current_tools = ALL_TOOLS
 current_model = global_agent["model"]
 current_api_url = global_agent["api_url"]
 current_api_key = global_agent["api_key"]
@@ -102,17 +116,99 @@ def build_system_prompt(agent_config):
     tool_names = [t["function"]["name"] for t in current_tools]
     tool_lines = "\n".join(f"- {name}: {TOOL_DESC_MAP.get(name, name)}" for name in tool_names)
 
-    return base + TOOL_RULES.format(tool_list=tool_lines, work_dir=WORK_DIR)
+    prompt = base + TOOL_RULES.format(tool_list=tool_lines, work_dir=WORK_DIR)
+
+    callable_agents = [a for a in list_agents() if a.get("callable") and a["id"] != agent_config.get("id", "")]
+    if callable_agents and "call_agent" in tool_names:
+        agent_info = "\n\n可调用的智能体:\n"
+        for a in callable_agents:
+            desc = a.get("when_to_call", "") or a.get("system_prompt", "")[:50]
+            agent_info += f"- @{a['id']} ({a['name']}): {desc}\n"
+        prompt += agent_info
+
+    return prompt
 
 
-def switch_agent(agent_id):
+
+def _get_callable_agents():
+    agents = list_agents()
+    return [a for a in agents if a.get("callable") and a["id"] != (current_agent["id"] if current_agent else "global")]
+
+
+def run_sub_agent(agent_id, message):
+    target = get_agent(agent_id)
+    if not target:
+        return f"[错误] 未找到智能体: @{agent_id}"
+    if not target.get("callable"):
+        return f"[错误] 智能体 @{agent_id} 未授权被调用"
+
+    sub_model = target["model"] if target["model"] else global_agent["model"]
+    sub_api_url = target["api_url"] if target["api_url"] else global_agent["api_url"]
+    sub_api_key = target["api_key"] if target["api_key"] else global_agent["api_key"]
+    sub_temp = target["temperature"] if target["temperature"] is not None else 0.7
+    sub_tools_def = filter_tools(ALL_TOOLS, target["allowed_tools"])
+
+    sub_tool_names = [t["function"]["name"] for t in sub_tools_def]
+    sub_tool_lines = "\n".join(f"- {name}: {TOOL_DESC_MAP.get(name, name)}" for name in sub_tool_names)
+    sub_system = (target["system_prompt"] or "") + TOOL_RULES.format(tool_list=sub_tool_lines, work_dir=WORK_DIR)
+
+    sub_history = [
+        {"role": "system", "content": sub_system},
+        {"role": "user", "content": message}
+    ]
+
+
+    for round_num in range(MAX_TOOL_ROUNDS):
+        try:
+            resp = send_chat_request(
+                sub_api_url, sub_api_key, sub_history, sub_model,
+                temperature=sub_temp, tools=sub_tools_def, stream=False,
+                connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"]
+            )
+        except Exception as e:
+            return f"[错误] 子智能体请求失败: {e}"
+
+        if resp.status_code != 200:
+            return f"[错误] 子智能体请求失败 [{resp.status_code}]"
+
+        data = resp.json()
+        msg = data["choices"][0]["message"]
+        finish_reason = data["choices"][0].get("finish_reason", "")
+
+        if finish_reason == "tool_calls" or msg.get("tool_calls"):
+            tool_calls = msg["tool_calls"]
+            assistant_msg = {
+                "role": "assistant",
+                "content": msg.get("content") or "",
+                "tool_calls": tool_calls
+            }
+            sub_history.append(assistant_msg)
+
+            for tc in tool_calls:
+                func_name = tc["function"]["name"]
+                func_args = tc["function"]["arguments"]
+                tc_id = tc["id"]
+                if mcp_mgr.is_mcp_tool(func_name):
+                    result = mcp_mgr.call_tool(func_name, func_args)
+                else:
+                    result = tool_executor.execute(func_name, func_args)
+                sub_history.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+            continue
+
+        final_content = msg.get("content", "")
+        return final_content if final_content else "[子智能体未返回内容]"
+
+    return "[错误] 子智能体达到最大工具调用轮数"
+
+
+def switch_agent(agent_id, silent=False):
     global current_agent, current_history, current_tools, current_model
     global current_api_url, current_api_key, current_temperature
 
     if agent_id is None or agent_id == "global":
         current_agent = global_agent
         current_history = agent_histories.setdefault("global", [])
-        current_tools = filter_tools(TOOLS_DEFINITION, global_agent["allowed_tools"])
+        current_tools = filter_tools(TOOLS_DEFINITION, global_agent["allowed_tools"]) + mcp_mgr.get_tools_definition()
         current_model = global_agent["model"]
         current_api_url = global_agent["api_url"]
         current_api_key = global_agent["api_key"]
@@ -124,7 +220,7 @@ def switch_agent(agent_id):
             return False
         current_agent = agent
         current_history = agent_histories.setdefault(agent_id, [])
-        current_tools = filter_tools(TOOLS_DEFINITION, agent["allowed_tools"])
+        current_tools = filter_tools(TOOLS_DEFINITION, agent["allowed_tools"]) + mcp_mgr.get_tools_definition()
         current_model = agent["model"] if agent["model"] else global_agent["model"]
         current_api_url = agent["api_url"] if agent["api_url"] else global_agent["api_url"]
         current_api_key = agent["api_key"] if agent["api_key"] else global_agent["api_key"]
@@ -139,10 +235,11 @@ def switch_agent(agent_id):
     system_content = build_system_prompt(current_agent)
     current_history.append({"role": "system", "content": system_content})
 
-    print(f"\n🔄 已切换到: {current_agent['name']} (@{current_agent['id']})")
-    tool_names = [t["function"]["name"] for t in current_tools]
-    display = " | ".join(TOOL_DISPLAY_MAP.get(n, n) for n in tool_names)
-    print(f"🔧 可用工具: {display}")
+    if not silent:
+        print(f"\n🔄 已切换到: {current_agent['name']} (@{current_agent['id']})")
+        tool_names = [t["function"]["name"] for t in current_tools]
+        display = " | ".join(TOOL_DISPLAY_MAP.get(n, n) for n in tool_names)
+        print(f"🔧 可用工具: {display}")
     return True
 
 
@@ -176,15 +273,26 @@ def format_tool_log(func_name, func_args):
         pattern = args.get("pattern", "?")
         path = args.get("path", ".")
         return f"  🔍 搜索: '{pattern}' @ {path}"
+    elif func_name == "call_agent":
+        agent_id = args.get("agent_id", "?")
+        message = args.get("message", "?")
+        short_msg = message[:50] + "..." if len(message) > 50 else message
+        return f"  🤖 调用 @{agent_id}: {short_msg}"
     elif func_name == "ask_user":
         question = args.get("question", "?")
         return f"  ❓ 提问: {question}"
+    elif mcp_mgr.is_mcp_tool(func_name):
+        return f"  🔌 MCP: {func_name}"
     else:
         return f"  🔧 {func_name}"
 
 
 def chat(user_input):
     mgr = HistoryManager(current_history, MAX_HISTORY_ROUNDS, AI_NAME)
+    global current_tools
+    mcp_defs = mcp_mgr.get_tools_definition()
+    if mcp_defs and not any(mcp_mgr.is_mcp_tool(t["function"]["name"]) for t in current_tools):
+        current_tools = current_tools + mcp_defs
     mgr.add_user_message(user_input)
 
     for round_num in range(MAX_TOOL_ROUNDS):
@@ -227,9 +335,21 @@ def chat(user_input):
                 func_args = tc["function"]["arguments"]
                 tc_id = tc["id"]
 
-                print(format_tool_log(func_name, func_args))
-
-                result = tool_executor.execute(func_name, func_args)
+                if func_name == "call_agent":
+                    _args = json.loads(func_args) if isinstance(func_args, str) else func_args
+                    _agent_id = _args.get("agent_id", "")
+                    result = run_sub_agent(_agent_id, _args.get("message", ""))
+                    if result.startswith("[错误]"):
+                        print(f"  🤖 @{_agent_id} 调用失败: {result}")
+                    else:
+                        print(f"  🤖 @{_agent_id}:")
+                        print(f"  {result}")
+                elif mcp_mgr.is_mcp_tool(func_name):
+                    print(format_tool_log(func_name, func_args))
+                    result = mcp_mgr.call_tool(func_name, func_args)
+                else:
+                    print(format_tool_log(func_name, func_args))
+                    result = tool_executor.execute(func_name, func_args)
                 mgr.save_tool_result(tc_id, result)
 
             continue
@@ -258,32 +378,54 @@ def chat(user_input):
 
     if final_text:
         mgr.save_assistant_reply(final_text)
+        if COMPRESS_THRESHOLD > 0 and mgr.needs_compression(COMPRESS_THRESHOLD):
+            _do_compress(mgr, silent=False)
     else:
         mgr.add_interrupt_hint()
     return final_text
 
 
+def _do_compress(mgr, silent=False):
+    if not silent:
+        print("\n📦 正在压缩历史记忆...")
+    success, result = mgr.compress_history(
+        current_api_url, current_api_key, current_model,
+        keep_recent=COMPRESS_KEEP_RECENT,
+        connect_timeout=_cfg["连接超时秒数"],
+        read_timeout=_cfg["响应超时秒数"]
+    )
+    if success:
+        rounds = mgr.count_rounds()
+        if not silent:
+            print(f"✅ 压缩完成，保留最近 {COMPRESS_KEEP_RECENT} 轮对话，摘要已注入上下文")
+            print(f"   当前记忆轮数: {rounds}\n")
+    else:
+        if not silent:
+            print(f"⚠️ 压缩未执行: {result}\n")
+
+
 def main():
-    switch_agent(None)
+    switch_agent(None, silent=True)
 
     agents = list_agents()
-
-    print(f"\n🤖 {AI_NAME}")
-    print(f"📂 工作目录: {WORK_DIR}")
-    tool_names = [t["function"]["name"] for t in current_tools]
-    display = " | ".join(TOOL_DISPLAY_MAP.get(n, n) for n in tool_names)
-    print(f"🔧 可用工具: {display}")
     other_agents = [a for a in agents if a["id"] != "global"]
+
+    print(f"\n🤖 工具作者: clq")
+    print(f"📂 工作目录: {WORK_DIR}")
     if other_agents:
         ids = ", ".join(f"@{a['id']}" for a in other_agents)
         print(f"🧩 可用智能体: {ids}")
+    mcp_status = mcp_mgr.get_status_line()
+    if mcp_status:
+        print(mcp_status)
     print("─" * 50)
-    print("输入 /exit 退出 | /clear 清空 | /reload 重载配置 | /agents 列表 | @名称 切换\n")
+    print("输入 /list 获取指令列表\n")
 
     if len(sys.argv) > 1:
         user_input = " ".join(sys.argv[1:])
         print(f"你: {user_input}")
         chat(user_input)
+        mcp_mgr.shutdown()
         return
 
     while True:
@@ -295,13 +437,95 @@ def main():
             print("\n再见！")
             break
 
+
+        if user_text == '"""' or user_text.startswith('"""'):
+            first_line = user_text[3:]
+            collected = [first_line] if first_line else []
+            print('  ... (多行模式，输入 \"\"\" 结束)')
+            while True:
+                try:
+                    ml = input("  ... ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\n已取消多行输入")
+                    collected = []
+                    break
+                if ml.rstrip() == '"""':
+                    break
+                collected.append(ml)
+            if not collected:
+                continue
+            user_text = "\n".join(collected).strip()
+            if not user_text:
+                continue
+
         if user_text.lower() == "/exit":
             print("对话结束")
             break
 
         if user_text.lower() == "/clear":
-            switch_agent(current_agent["id"] if current_agent else None)
+            switch_agent(current_agent["id"] if current_agent else None, silent=True)
             print("📝 记忆已清空\n")
+            continue
+
+
+
+        if user_text.lower() == "/undo":
+            if len(current_history) <= 1:
+                print("⚠️ 没有可撤销的对话\n")
+                continue
+            removed = 0
+            while len(current_history) > 1:
+                last = current_history[-1]
+                if last["role"] == "user" and removed > 0:
+                    current_history.pop()
+                    removed += 1
+                    break
+                current_history.pop()
+                removed += 1
+            print(f"↩️  已撤销上一轮对话（移除 {removed} 条消息）\n")
+            continue
+
+        if user_text.lower() == "/compress":
+            mgr = HistoryManager(current_history, MAX_HISTORY_ROUNDS, AI_NAME)
+            rounds = mgr.count_rounds()
+            if rounds <= COMPRESS_KEEP_RECENT:
+                print(f"⚠️ 当前仅 {rounds} 轮对话，无需压缩\n")
+                continue
+            _do_compress(mgr, silent=False)
+            continue
+
+        if user_text.lower() == "/list":
+            print("\n📋 可用指令:")
+            print("  /exit     - 退出程序")
+            print("  /clear    - 清空当前对话记忆")
+            print("  /undo     - 撤销上一轮对话")
+            print("  /compress - 压缩历史记忆（减少 token 占用）")
+            print("  /reload   - 重新加载配置和智能体")
+            print("  /agents   - 查看所有智能体列表")
+            print("  /mcp      - 查看已加载的 MCP 工具")
+            print("  /list     - 显示本指令列表")
+            print()
+            print("📋 特殊输入:")
+            print("  @名称     - 切换到指定智能体")
+            print("  @名称 内容 - 切换并直接对话")
+            print('  \"\"\"       - 进入多行输入模式')
+            print()
+            continue
+
+        if user_text.lower() == "/mcp":
+            mcp_tools = mcp_mgr.get_tool_names()
+            if mcp_tools:
+                print(f"\n🔌 已加载 MCP 工具 ({len(mcp_tools)} 个):")
+                for name in mcp_tools:
+                    for td in mcp_mgr.get_tools_definition():
+                        if td["function"]["name"] == name:
+                            desc = td["function"].get("description", "")
+                            print(f"  - {name}: {desc}")
+                            break
+            else:
+                print("\n⚠️ 未加载任何 MCP 工具")
+                print(f"  将 MCP 配置文件放入 mcp/servers/ 目录即可自动加载")
+            print()
             continue
 
         if user_text.lower() == "/reload":
@@ -309,6 +533,11 @@ def main():
             tool_executor.config = _cfg
             MAX_HISTORY_ROUNDS = _cfg["最大记忆轮数"]
             MAX_TOOL_ROUNDS = _cfg["最大工具调用轮数"]
+            COMPRESS_THRESHOLD = _cfg["历史压缩阈值轮数"]
+            COMPRESS_KEEP_RECENT = _cfg["压缩保留最近轮数"]
+            mcp_mgr.shutdown()
+            mcp_mgr.load_servers()
+            ALL_TOOLS = TOOLS_DEFINITION + mcp_mgr.get_tools_definition()
             print("🔄 配置已重新加载")
             for key, val in _cfg.items():
                 print(f"   [{key}] = {val}")
@@ -324,7 +553,7 @@ def main():
                     global_agent.update(refreshed_global)
                     current_agent.update(refreshed_global)
                     print("🔄 全局智能体配置已重载")
-            switch_agent(agent_id)
+            switch_agent(agent_id, silent=True)
             print()
             continue
 
@@ -360,6 +589,8 @@ def main():
 
         chat(user_text)
         print()
+
+    mcp_mgr.shutdown()
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ deepseek-chat
 [温度]
 0.7
 [可用工具]
-read_file, edit_file, run_command, list_dir, search_files
+read_file, edit_file, run_command, list_dir, search_files, call_agent
 [可被调用]
 否
 [何时调用]
