@@ -2,7 +2,6 @@ const chatArea = document.getElementById("chat-area");
 const userInput = document.getElementById("user-input");
 const btnSend = document.getElementById("btn-send");
 const btnStop = document.getElementById("btn-stop");
-const btnClear = document.getElementById("btn-clear");
 const btnNewChat = document.getElementById("btn-new-chat");
 const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
 const sidebar = document.getElementById("sidebar");
@@ -108,9 +107,15 @@ const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 btnToggleSidebar.addEventListener("click", () => sidebar.classList.toggle("collapsed"));
 btnNewChat.addEventListener("click", createNewConversation);
+const convSearchInput = document.getElementById("conv-search-input");
+if (convSearchInput) {
+    convSearchInput.addEventListener("input", () => {
+        convSearchKeyword = convSearchInput.value || "";
+        renderConvList(convCache);
+    });
+}
 btnSend.addEventListener("click", sendMessage);
 btnStop.addEventListener("click", stopGeneration);
-btnClear.addEventListener("click", clearCurrentConversation);
 userInput.addEventListener("input", autoResize);
 userInput.addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -139,6 +144,7 @@ agentSelectorBtn.addEventListener("click", toggleAgentDropdown);
 agentDropdownManage.addEventListener("click", () => { closeAgentDropdown(); openAgentPanel(); });
 document.addEventListener("click", e => {
     if (!agentSelector.contains(e.target)) closeAgentDropdown();
+    if (!e.target.closest(".conv-item-more") && !e.target.closest(".conv-menu")) closeConvMenus();
 });
 
 btnCloseAgentPanel.addEventListener("click", closeAgentPanel);
@@ -746,12 +752,9 @@ async function openManageModels() {
     modelManageOverlay.classList.add("active");
 }
 
-async function closeManageModels() {
+function closeManageModels() {
     modelManageOverlay.classList.remove("active");
-    if (btnSaveApiConfig.dataset.fromList === "1") {
-        btnSaveApiConfig.dataset.fromList = "";
-        await openModelList();
-    }
+    btnSaveApiConfig.dataset.fromList = "";
 }
 
 async function openModelList() {
@@ -817,7 +820,6 @@ async function renderCustomModelList() {
             '<button class="btn-remove-model" title="删除">✕</button>' +
             '</div>';
         item.querySelector(".btn-edit-model").addEventListener("click", async () => {
-            closeModelList();
             await openManageModels();
             btnSaveApiConfig.dataset.fromList = "1";
             addProvider.value = m.provider;
@@ -900,9 +902,14 @@ async function saveApiConfig() {
             keyStatus.className = "key-status ok";
         }
         await buildQuickModelList();
+        const fromList = btnSaveApiConfig.dataset.fromList === "1";
         btnSaveApiConfig.dataset.fromList = "";
         modelManageOverlay.classList.remove("active");
-        await openModelList();
+        if (fromList) {
+            await renderCustomModelList();
+        } else {
+            await openModelList();
+        }
     } catch (err) {
         showToast("保存失败: " + err.message, "error");
     }
@@ -911,32 +918,138 @@ async function saveApiConfig() {
 
 
 // ==================== 对话管理 ====================
+let convCache = [];
+let convSearchKeyword = "";
+
+const CONV_MENU_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg>';
+
 async function loadConversations() {
     const resp = await fetch("/api/conversations");
     const list = await resp.json();
+    convCache = list;
     renderConvList(list);
+}
+
+function closeConvMenus() {
+    document.querySelectorAll(".conv-menu.open").forEach(m => m.classList.remove("open"));
+}
+
+if (convList) {
+    convList.addEventListener("scroll", () => {
+        if (document.querySelector(".conv-menu.open")) closeConvMenus();
+    });
+}
+
+function buildConvItem(c) {
+    const item = document.createElement("div");
+    item.className = "conv-item" + (c.id === currentConvId ? " active" : "");
+    item.dataset.id = c.id;
+    item.innerHTML =
+        '<span class="conv-item-icon">💬</span>' +
+        '<span class="conv-item-title">' + escapeHtml(c.title) + '</span>' +
+        '<button class="conv-item-more" title="更多">' + CONV_MENU_SVG + '</button>' +
+        '<div class="conv-menu">' +
+        '<button class="conv-menu-item" data-act="rename">重命名</button>' +
+        '<button class="conv-menu-item" data-act="pin">' + (c.pinned ? "取消置顶" : "置顶") + '</button>' +
+        '<button class="conv-menu-item danger" data-act="delete">删除</button>' +
+        '</div>';
+    item.addEventListener("click", e => {
+        if (e.target.closest(".conv-item-more") || e.target.closest(".conv-menu")) return;
+        switchConversation(c.id);
+    });
+    const moreBtn = item.querySelector(".conv-item-more");
+    const menu = item.querySelector(".conv-menu");
+    moreBtn.addEventListener("click", e => {
+        e.stopPropagation();
+        const wasOpen = menu.classList.contains("open");
+        closeConvMenus();
+        if (!wasOpen) {
+            menu.classList.add("open");
+            const btnRect = moreBtn.getBoundingClientRect();
+            menu.style.visibility = "hidden";
+            const menuRect = menu.getBoundingClientRect();
+            let left = btnRect.right + 6;
+            let top = btnRect.top;
+            if (left + menuRect.width > window.innerWidth - 8) {
+                left = btnRect.left - menuRect.width - 6;
+            }
+            if (top + menuRect.height > window.innerHeight - 8) {
+                top = window.innerHeight - menuRect.height - 8;
+            }
+            if (top < 8) top = 8;
+            if (left < 8) left = 8;
+            menu.style.left = left + "px";
+            menu.style.top = top + "px";
+            menu.style.visibility = "";
+        }
+    });
+    menu.querySelectorAll(".conv-menu-item").forEach(btn => {
+        btn.addEventListener("click", async e => {
+            e.stopPropagation();
+            closeConvMenus();
+            const act = btn.dataset.act;
+            if (act === "rename") await renameConversation(c);
+            else if (act === "pin") await togglePinConversation(c);
+            else if (act === "delete") await deleteConversation(c.id);
+        });
+    });
+    return item;
 }
 
 function renderConvList(list) {
     convList.innerHTML = "";
-    list.forEach(c => {
-        const item = document.createElement("div");
-        item.className = "conv-item" + (c.id === currentConvId ? " active" : "");
-        item.dataset.id = c.id;
-        item.innerHTML =
-            '<span class="conv-item-icon">💬</span>' +
-            '<span class="conv-item-title">' + escapeHtml(c.title) + '</span>' +
-            '<button class="conv-item-delete" title="删除">✕</button>';
-        item.addEventListener("click", e => {
-            if (e.target.closest(".conv-item-delete")) return;
-            switchConversation(c.id);
-        });
-        item.querySelector(".conv-item-delete").addEventListener("click", e => {
-            e.stopPropagation();
-            deleteConversation(c.id);
-        });
-        convList.appendChild(item);
+    const kw = convSearchKeyword.trim().toLowerCase();
+    let filtered = list;
+    if (kw) filtered = list.filter(c => (c.title || "").toLowerCase().includes(kw));
+
+    const pinned = filtered.filter(c => c.pinned);
+    const normal = filtered.filter(c => !c.pinned);
+
+    if (filtered.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "conv-empty-hint";
+        empty.textContent = kw ? "没有匹配的对话" : "还没有对话";
+        convList.appendChild(empty);
+        return;
+    }
+
+    if (pinned.length > 0) {
+        const sec = document.createElement("div");
+        sec.className = "conv-section-label";
+        sec.textContent = "置顶";
+        convList.appendChild(sec);
+        pinned.forEach(c => convList.appendChild(buildConvItem(c)));
+        if (normal.length > 0) {
+            const sec2 = document.createElement("div");
+            sec2.className = "conv-section-label";
+            sec2.textContent = "全部对话";
+            convList.appendChild(sec2);
+        }
+    }
+    normal.forEach(c => convList.appendChild(buildConvItem(c)));
+}
+
+async function renameConversation(c) {
+    const name = await promptDialog("重命名对话", c.title || "", { okText: "保存", placeholder: "输入对话名称" });
+    if (name === null) return;
+    const title = name.trim();
+    if (!title || title === c.title) return;
+    await fetch("/api/conversations/" + c.id + "/title", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title })
     });
+    if (c.id === currentConvId) headerTitle.textContent = title;
+    await loadConversations();
+}
+
+async function togglePinConversation(c) {
+    await fetch("/api/conversations/" + c.id + "/pin", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned: !c.pinned })
+    });
+    await loadConversations();
 }
 
 async function createNewConversation() {
@@ -964,9 +1077,18 @@ async function switchConversation(cid) {
     chatArea.innerHTML = "";
     if (msgs.length === 0) { showWelcome(); }
     else {
+        let lastAiBubble = null;
         msgs.forEach(m => {
             const role = m.role === "user" ? "user" : "ai";
             let text = typeof m.content === "string" ? m.content : (m.content.find(c => c.type === "text") || {}).text || "";
+            if (role === "user" && typeof text === "string" && text.startsWith("[[ASK_ANSWER]]")) {
+                const target = lastAiBubble || addMessage("ai", "");
+                renderAskSummaryCard(target, text.slice("[[ASK_ANSWER]]".length));
+                return;
+            }
+            if (role === "ai" && typeof text === "string" && /\[ASK\][\s\S]*?\[\/ASK\]/.test(text)) {
+                text = text.replace(/\[ASK\][\s\S]*?\[\/ASK\]/g, "").trim();
+            }
             const imgs = typeof m.content !== "string" ? m.content.filter(c => c.type === "image_url").map(c => c.image_url.url) : [];
             let historyDocs = [];
             if (role === "user") {
@@ -984,7 +1106,8 @@ async function switchConversation(cid) {
                     }
                 }
             }
-            addMessage(role, text, imgs, historyDocs);
+            const renderedBubble = addMessage(role, text, imgs, historyDocs);
+            if (role === "ai") lastAiBubble = renderedBubble;
         });
         const allMsgs = chatArea.querySelectorAll(".message.ai");
         if (allMsgs.length > 0) {
@@ -1012,14 +1135,6 @@ async function deleteConversation(cid) {
     await fetch("/api/conversations/" + cid, { method: "DELETE" });
     if (currentConvId === cid) { currentConvId = null; showWelcome(); headerTitle.textContent = "AI Chat"; }
     await loadConversations();
-}
-
-async function clearCurrentConversation() {
-    if (!currentConvId) return;
-    if (isGenerating) stopGeneration();
-    await fetch("/api/conversations/" + currentConvId + "/clear", { method: "POST" });
-    chatArea.innerHTML = "";
-    showWelcome();
 }
 
 function showWelcome() { chatArea.innerHTML = welcomeHTML; }
@@ -1184,6 +1299,267 @@ function appendRetryButton(msgDiv, userText, rolledBack) {
     msgDiv.appendChild(btn);
 }
 
+function renderAskSummaryCard(bubble, answerText) {
+    const card = document.createElement("div");
+    card.className = "ask-card answered collapsed";
+
+    const head = document.createElement("div");
+    head.className = "ask-head";
+    const caret = document.createElement("span");
+    caret.className = "ask-caret";
+    caret.textContent = "\u25B8";
+    const headTitle = document.createElement("span");
+    headTitle.className = "ask-head-title";
+    headTitle.textContent = "\u63D0\u95EE";
+    const headProg = document.createElement("span");
+    headProg.className = "ask-head-prog";
+    headProg.textContent = "\u5DF2\u56DE\u7B54";
+    head.appendChild(caret);
+    head.appendChild(headTitle);
+    head.appendChild(headProg);
+    card.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "ask-body";
+    const wrap = document.createElement("div");
+    wrap.className = "ask-summary";
+
+    const lines = String(answerText).split("\n").filter(l => l.trim() && !l.startsWith("\u3010"));
+    lines.forEach(line => {
+        const row = document.createElement("div");
+        row.className = "ask-sum-row";
+        const arrow = line.indexOf("\u2192");
+        let q = line, a = "";
+        if (arrow >= 0) {
+            q = line.slice(0, arrow).trim();
+            a = line.slice(arrow + 1).trim();
+        } else if (line.startsWith("\u8865\u5145\uFF1A")) {
+            q = "\u8865\u5145";
+            a = line.slice(3).trim();
+        }
+        const qEl = document.createElement("div");
+        qEl.className = "ask-sum-q";
+        qEl.textContent = q;
+        const aEl = document.createElement("div");
+        aEl.className = "ask-sum-a";
+        aEl.textContent = a;
+        row.appendChild(qEl);
+        if (a) row.appendChild(aEl);
+        wrap.appendChild(row);
+    });
+    body.appendChild(wrap);
+    card.appendChild(body);
+
+    head.addEventListener("click", () => {
+        const collapsed = card.classList.toggle("collapsed");
+        caret.textContent = collapsed ? "\u25B8" : "\u25BE";
+    });
+
+    bubble.appendChild(card);
+}
+
+function renderAskCard(bubble, questions) {
+    // 组装页：原始问题 + 末尾“补充”页
+    const pages = questions.map(q => ({
+        type: q.type,
+        q: q.q || "",
+        options: q.options || [],
+        optional: false,
+        selected: null,
+        otherText: "",
+        textVal: ""
+    }));
+    pages.push({
+        type: "text",
+        q: "还有什么需要补充的吗？",
+        options: [],
+        optional: true,
+        selected: null,
+        otherText: "",
+        textVal: ""
+    });
+
+    let cur = 0;
+    let answered = false;
+
+    const card = document.createElement("div");
+    card.className = "ask-card";
+
+    // 头部（可折叠）
+    const head = document.createElement("div");
+    head.className = "ask-head";
+    const caret = document.createElement("span");
+    caret.className = "ask-caret";
+    caret.textContent = "▾";
+    const headTitle = document.createElement("span");
+    headTitle.className = "ask-head-title";
+    headTitle.textContent = "提问";
+    const headProg = document.createElement("span");
+    headProg.className = "ask-head-prog";
+    head.appendChild(caret);
+    head.appendChild(headTitle);
+    head.appendChild(headProg);
+    card.appendChild(head);
+
+    // 主体（分页内容）
+    const body = document.createElement("div");
+    body.className = "ask-body";
+    card.appendChild(body);
+
+    // 底部操作
+    const foot = document.createElement("div");
+    foot.className = "ask-foot";
+    const btnPrev = document.createElement("button");
+    btnPrev.type = "button";
+    btnPrev.className = "ask-btn ask-btn-ghost";
+    btnPrev.textContent = "上一步";
+    const btnNext = document.createElement("button");
+    btnNext.type = "button";
+    btnNext.className = "ask-btn ask-btn-primary";
+    btnNext.textContent = "下一步";
+    foot.appendChild(btnPrev);
+    foot.appendChild(btnNext);
+    card.appendChild(foot);
+
+    head.addEventListener("click", () => {
+        const collapsed = card.classList.toggle("collapsed");
+        caret.textContent = collapsed ? "▸" : "▾";
+    });
+
+    function renderSummary() {
+        const wrap = document.createElement("div");
+        wrap.className = "ask-summary";
+        pages.forEach((p, i) => {
+            let ans = "";
+            if (p.type === "choice") {
+                ans = (p.selected === "其他") ? (p.otherText.trim() || "（其他）") : (p.selected || "（未答）");
+            } else {
+                ans = p.textVal.trim() || (p.optional ? "（无补充）" : "（未答）");
+            }
+            const row = document.createElement("div");
+            row.className = "ask-sum-row";
+            const qEl = document.createElement("div");
+            qEl.className = "ask-sum-q";
+            qEl.textContent = (p.optional ? "补充" : (i + 1) + ". " + p.q);
+            const aEl = document.createElement("div");
+            aEl.className = "ask-sum-a";
+            aEl.textContent = ans;
+            row.appendChild(qEl);
+            row.appendChild(aEl);
+            wrap.appendChild(row);
+        });
+        return wrap;
+    }
+
+    function renderPage() {
+        body.innerHTML = "";
+        const p = pages[cur];
+        headProg.textContent = (cur + 1) + " / " + pages.length;
+
+        const qTitle = document.createElement("div");
+        qTitle.className = "ask-q-title";
+        qTitle.textContent = (p.optional ? "" : (cur + 1) + ". ") + p.q + (p.optional ? "（可留空）" : "");
+        body.appendChild(qTitle);
+
+        if (p.type === "choice") {
+            const opts = (p.options || []).concat(["其他"]);
+            const optWrap = document.createElement("div");
+            optWrap.className = "ask-options";
+            const otherInput = document.createElement("input");
+            otherInput.type = "text";
+            otherInput.className = "ask-other-input";
+            otherInput.placeholder = "请描述你的答案…";
+            otherInput.value = p.otherText;
+            otherInput.style.display = (p.selected === "其他") ? "" : "none";
+            otherInput.addEventListener("input", () => { p.otherText = otherInput.value; });
+            opts.forEach(opt => {
+                const isOther = (opt === "其他");
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "ask-opt" + (p.selected === opt ? " active" : "");
+                btn.textContent = opt;
+                btn.addEventListener("click", () => {
+                    optWrap.querySelectorAll(".ask-opt").forEach(b => b.classList.remove("active"));
+                    btn.classList.add("active");
+                    p.selected = opt;
+                    otherInput.style.display = isOther ? "" : "none";
+                    if (isOther) setTimeout(() => otherInput.focus(), 20);
+                });
+                optWrap.appendChild(btn);
+            });
+            body.appendChild(optWrap);
+            body.appendChild(otherInput);
+        } else {
+            const ta = document.createElement("textarea");
+            ta.className = "ask-text-input";
+            ta.rows = 3;
+            ta.placeholder = p.optional ? "补充说明（选填）…" : "输入你的回答…";
+            ta.value = p.textVal;
+            ta.addEventListener("input", () => { p.textVal = ta.value; });
+            body.appendChild(ta);
+        }
+
+        btnPrev.style.visibility = (cur === 0) ? "hidden" : "visible";
+        btnNext.textContent = (cur === pages.length - 1) ? "提交回答" : "下一步";
+    }
+
+    function validateCurrent() {
+        const p = pages[cur];
+        if (p.optional) return true;
+        if (p.type === "choice") {
+            if (!p.selected) { showToast("请先回答这个问题", "error"); return false; }
+            if (p.selected === "其他" && !p.otherText.trim()) { showToast("请描述你的“其他”答案", "error"); return false; }
+        } else {
+            if (!p.textVal.trim()) { showToast("请先回答这个问题", "error"); return false; }
+        }
+        return true;
+    }
+
+    btnPrev.addEventListener("click", () => {
+        if (cur > 0) { cur--; renderPage(); }
+    });
+
+    btnNext.addEventListener("click", () => {
+        if (!validateCurrent()) return;
+        if (cur < pages.length - 1) {
+            cur++;
+            renderPage();
+            return;
+        }
+        // 提交
+        answered = true;
+        card.classList.add("answered");
+        headProg.textContent = "已回答";
+        foot.remove();
+        body.innerHTML = "";
+        body.appendChild(renderSummary());
+        card.classList.add("collapsed");
+        caret.textContent = "▸";
+
+        const lines = [];
+        pages.forEach((p, i) => {
+            if (p.optional) {
+                const sup = p.textVal.trim();
+                if (sup) lines.push("补充：" + sup);
+                return;
+            }
+            let ans = "";
+            if (p.type === "choice") {
+                ans = (p.selected === "其他") ? (p.otherText.trim() || "（其他，未填写）") : p.selected;
+            } else {
+                ans = p.textVal.trim();
+            }
+            lines.push((i + 1) + ". " + p.q + " → " + ans);
+        });
+        const answerText = "【我对你的提问的回答】\n" + lines.join("\n");
+        sendMessage(answerText, { askAnswer: true });
+    });
+
+    renderPage();
+    bubble.appendChild(card);
+    if (shouldAutoScroll()) chatArea.scrollTop = chatArea.scrollHeight;
+}
+
 function stopGeneration() {
     if (currentAbort) {
         currentAbort.abort();
@@ -1195,11 +1571,17 @@ function stopGeneration() {
     btnSend.disabled = false;
 }
 
-async function sendMessage() {
+async function sendMessage(presetText, opts) {
     userScrolledUp = false;
-    const text = userInput.value.trim();
-    const hasDoc = pendingDocs.some(d => !d.loading && d.text);
-    if ((!text && pendingImages.length === 0 && !hasDoc) || isGenerating) return;
+    const isPreset = (presetText != null);
+    const isAskAnswer = !!(opts && opts.askAnswer);
+    const text = isPreset ? String(presetText) : userInput.value.trim();
+    const hasDoc = !isPreset && pendingDocs.some(d => !d.loading && d.text);
+    if (isPreset) {
+        if (!text || isGenerating) return;
+    } else if ((!text && pendingImages.length === 0 && !hasDoc) || isGenerating) {
+        return;
+    }
     if (pendingDocs.some(d => d.loading)) {
         showToast("文档正在解析中，请稍候", "error");
         return;
@@ -1233,21 +1615,29 @@ async function sendMessage() {
     isGenerating = true;
     btnSend.style.display = "none";
     btnStop.style.display = "";
-    const images = pendingImages.slice();
-    const docs = pendingDocs.slice();
-    pendingImages = [];
-    pendingDocs = [];
-    renderPreviews();
-    userInput.value = "";
-    autoResize();
+    const images = isPreset ? [] : pendingImages.slice();
+    const docs = isPreset ? [] : pendingDocs.slice();
+    if (!isPreset) {
+        pendingImages = [];
+        pendingDocs = [];
+        renderPreviews();
+        userInput.value = "";
+        autoResize();
+    }
 
-    addMessage("user", text, images, docs);
+    if (!isAskAnswer) {
+        addMessage("user", text, images, docs);
+    }
     let renderPending = false;
+    let streamEnded = false;
+    let rafId = 0;
     function scheduleRender() {
-        if (renderPending) return;
+        if (renderPending || streamEnded) return;
         renderPending = true;
-        requestAnimationFrame(() => {
+        rafId = requestAnimationFrame(() => {
             renderPending = false;
+            rafId = 0;
+            if (streamEnded) return;
             if (cursor.parentNode) cursor.remove();
             let html = "";
             if (searchStatusText) {
@@ -1271,6 +1661,7 @@ async function sendMessage() {
     let isReasoning = false;
     let searchStatusText = "";
     let searchSources = [];
+    let askPayload = null;
 
     let messageText = text;
     if (docs.length > 0) {
@@ -1278,6 +1669,9 @@ async function sendMessage() {
         messageText = docParts + (text ? "\n\n" + text : "");
     }
     const payload = { conversation_id: currentConvId, message: messageText };
+    if (isAskAnswer) {
+        payload.ask_answer = true;
+    }
     if (images.length > 0) {
         payload.images = images.map(img => img.base64);
     }
@@ -1371,6 +1765,9 @@ async function sendMessage() {
                     if (parsed.sources) {
                         searchSources = parsed.sources;
                     }
+                    if (parsed.ask) {
+                        askPayload = parsed.ask;
+                    }
                 } catch {
                     fullText += data;
                     scheduleRender();
@@ -1397,6 +1794,8 @@ async function sendMessage() {
             appendRetryButton(bubble.closest(".message"), text, true);
         }
     } finally {
+        streamEnded = true;
+        if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
         if (cursor.parentNode) cursor.remove();
         currentAbort = null;
         isGenerating = false;
@@ -1405,7 +1804,11 @@ async function sendMessage() {
         btnSend.disabled = false;
         userInput.focus();
     }
-    if (fullText || reasoningText) {
+    if (askPayload) {
+        fullText = fullText.replace(/\[ASK\][\s\S]*?\[\/ASK\]/g, "").trim();
+        if (askPayload.prefix) fullText = String(askPayload.prefix);
+    }
+    if (fullText || reasoningText || askPayload) {
         bubble.classList.remove("streaming");
         let finalHtml = "";
         if (reasoningText) {
@@ -1435,7 +1838,11 @@ async function sendMessage() {
             finalHtml += srcHtml;
         }
         bubble.innerHTML = finalHtml;
-        appendRetryButton(bubble.closest(".message"), text, false);
+        if (askPayload && askPayload.questions && askPayload.questions.length) {
+            renderAskCard(bubble, askPayload.questions);
+        } else {
+            appendRetryButton(bubble.closest(".message"), text, false);
+        }
     }
     await loadConversations();
 }
@@ -1512,6 +1919,43 @@ function confirmDialog(message, opts) {
         document.addEventListener("keydown", onKey);
         overlay.classList.add("active");
         okBtn.focus();
+    });
+}
+
+function promptDialog(title, defaultValue, opts) {
+    opts = opts || {};
+    return new Promise(resolve => {
+        const overlay = document.getElementById("prompt-overlay");
+        const titleEl = document.getElementById("prompt-title");
+        const input = document.getElementById("prompt-input");
+        const okBtn = document.getElementById("prompt-ok");
+        const cancelBtn = document.getElementById("prompt-cancel");
+        titleEl.textContent = title || "输入";
+        input.value = defaultValue || "";
+        input.placeholder = opts.placeholder || "";
+        okBtn.textContent = opts.okText || "确定";
+        cancelBtn.textContent = opts.cancelText || "取消";
+        function cleanup(result) {
+            overlay.classList.remove("active");
+            okBtn.removeEventListener("click", onOk);
+            cancelBtn.removeEventListener("click", onCancel);
+            overlay.removeEventListener("click", onBackdrop);
+            input.removeEventListener("keydown", onKey);
+            resolve(result);
+        }
+        function onOk() { cleanup(input.value); }
+        function onCancel() { cleanup(null); }
+        function onBackdrop(e) { if (e.target === overlay) cleanup(null); }
+        function onKey(e) {
+            if (e.key === "Escape") { e.preventDefault(); cleanup(null); }
+            else if (e.key === "Enter") { e.preventDefault(); cleanup(input.value); }
+        }
+        okBtn.addEventListener("click", onOk);
+        cancelBtn.addEventListener("click", onCancel);
+        overlay.addEventListener("click", onBackdrop);
+        input.addEventListener("keydown", onKey);
+        overlay.classList.add("active");
+        setTimeout(() => { input.focus(); input.select(); }, 30);
     });
 }
 

@@ -1,6 +1,7 @@
 import re
 import ipaddress
 import socket
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, unquote, parse_qs
 
@@ -233,10 +234,21 @@ def search_and_fetch(query, max_results=5):
     return {"ok": True, "sources": sources, "context": context, "pages": fetched}
 
 
+def _current_date_str():
+    now = datetime.now()
+    wd = "一二三四五六日"[now.weekday()]
+    return now.strftime("%Y年%m月%d日") + f" 星期{wd}"
+
+
 def build_search_prompt(query, search_result):
     if not search_result.get("context"):
         return ""
+    today = _current_date_str()
     return (
+        f"【当前真实日期】今天是 {today}（由系统提供，准确无误，必须以此为准）。\n"
+        "重要：下面搜索结果网页里出现的日期，是网页的发布日期或历史内容日期，"
+        "不代表今天。凡涉及「今天/今日/现在/最新」的判断，一律以上面的系统日期为准，"
+        "绝不要因为网页里写着别的日期就改变对今天日期的认知。\n\n"
         "以下是针对用户问题的联网搜索结果（来自互联网，可能存在不准确信息，请甄别）：\n\n"
         f"{search_result['context']}\n\n"
         "请基于以上搜索结果回答用户的问题，并在回答末尾用「参考来源」列出你引用的网址。"
@@ -266,10 +278,33 @@ def _parse_json_obj(text):
         return None
 
 
+def should_search(user_query, llm_call, history_hint=""):
+    if not user_query or not user_query.strip():
+        return False
+    prompt = (
+        "你是一个搜索决策器。判断回答用户这条消息是否需要联网检索实时或外部信息。\n"
+        "需要联网的情况：询问新闻、天气、价格、赛事、版本/发布信息、近期事件、"
+        "具体事实查证、需要引用外部网页内容等。\n"
+        "不需要联网的情况：打招呼闲聊、询问AI自身能力或身份、纯逻辑推理、"
+        "写代码/改写润色、翻译、基于已有上下文即可回答的问题。\n"
+        "只输出 JSON：{\"need_search\": true/false}。不要输出其它内容。\n\n"
+        f"{history_hint}"
+        f"用户消息：{user_query}"
+    )
+    raw = llm_call([{"role": "user", "content": prompt}])
+    obj = _parse_json_obj(raw)
+    if obj is not None and "need_search" in obj:
+        return bool(obj.get("need_search"))
+    return True
+
+
 def plan_queries(user_query, llm_call, history_hint=""):
+    today = _current_date_str()
     prompt = (
         "你是一个联网搜索助理。请根据用户的问题，生成 1-2 个最有效的搜索引擎查询词，"
         "用于检索能回答该问题的网页。查询词要精准、包含关键实体和版本号，必要时用英文。\n"
+        f"当前真实日期是 {today}。当问题涉及「今天/今日/最新/现在/近期」等时效信息时，"
+        "请在查询词中带上具体年月日，以便搜到当天的网页。\n"
         "只输出 JSON，格式：{\"queries\": [\"查询词1\", \"查询词2\"]}。不要输出其它内容。\n\n"
         f"{history_hint}"
         f"用户问题：{user_query}"
@@ -297,6 +332,13 @@ def _tokenize(text):
     tokens = re.findall(r"[a-z0-9.]+|[\u4e00-\u9fff]+", text)
     out = []
     for t in tokens:
+        if re.fullmatch(r"[\u4e00-\u9fff]+", t):
+            for ch in t:
+                if ch not in _STOPWORDS:
+                    out.append(ch)
+            for i in range(len(t) - 1):
+                out.append(t[i:i + 2])
+            continue
         if t in _STOPWORDS or len(t) <= 1:
             continue
         out.append(t)
@@ -357,7 +399,7 @@ def evaluate_pages(user_query, pages, llm_call):
     }
 
 
-def agentic_search(user_query, llm_call, max_results=5, max_rounds=2, progress=None):
+def agentic_search(user_query, llm_call, max_results=5, max_rounds=1, progress=None):
     def emit(msg):
         if progress:
             try:
@@ -405,7 +447,8 @@ def agentic_search(user_query, llm_call, max_results=5, max_rounds=2, progress=N
     if relevant:
         final_pages = _keyword_filter(user_query, list(relevant.values()), min_hit=1) or list(relevant.values())
     else:
-        final_pages = _keyword_filter(user_query, list(collected.values()), min_hit=1)
+        final_pages = (_keyword_filter(user_query, list(collected.values()), min_hit=1)
+                       or list(collected.values()))
     if not final_pages:
         emit("未检索到相关网页")
         return {"ok": False, "sources": [], "context": "", "rounds": list(tried_queries)}

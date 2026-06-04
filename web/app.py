@@ -273,6 +273,60 @@ def _build_callable_prompt(callable_agents):
     return "\n".join(lines)
 
 
+ASK_ANSWER_PREFIX = "[[ASK_ANSWER]]"
+
+
+ASK_PROMPT = (
+    "\n\n【向用户提问能力·重要】你具备主动向用户提问的能力，这是你的核心交互方式之一。"
+    "当任务存在多种可能方向、需求不明确、缺少关键信息、或你需要用户在几个方案中做选择时，"
+    "你【应当主动发起提问】来获取信息，而不是自行假设或要求用户重述。需要提问时，"
+    "在回复中输出一个用 [ASK] 与 [/ASK] 包裹的 JSON，格式如下：\n"
+    "[ASK]{\"questions\":[{\"type\":\"choice\",\"q\":\"问题文本\",\"options\":[\"选项A\",\"选项B\"]},"
+    "{\"type\":\"text\",\"q\":\"另一个需要用户描述的问题\"}]}[/ASK]\n"
+    "规则：\n"
+    "1. type 为 choice（选项题，需给 options 数组）或 text（问答题，用户自由输入）。\n"
+    "2. 一次最多提 5 个问题（不含系统自动追加的补充项），不要超过。\n"
+    "3. 选项题不必自己加“其他”，系统会自动为用户提供“其他”和“是否需要补充”的入口。\n"
+    "4. [ASK] 之前可以写一句简短引导语，[ASK] 块必须是本次回复的最后内容，其后不要再输出正文。\n"
+    "5. 信息已经充分、能直接给出可靠答案时就直接回答，不要为了提问而提问；"
+    "但只要存在需求歧义或方向选择，就优先用提问澄清。收到用户回答后，结合回答自然地继续完成任务，"
+    "无需复述用户的每一条回答。"
+)
+
+
+def _parse_ask_block(text):
+    """从回复中解析 [ASK]{json}[/ASK]，返回 (questions_list 或 None, 去掉ASK块的前置文本)。"""
+    m = re.search(r"\[ASK\]([\s\S]*?)\[/ASK\]", text)
+    if not m:
+        return None, text
+    raw = m.group(1).strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None, text
+    questions = data.get("questions") if isinstance(data, dict) else None
+    if not isinstance(questions, list) or not questions:
+        return None, text
+    clean = []
+    for q in questions[:5]:
+        if not isinstance(q, dict):
+            continue
+        qtype = "choice" if q.get("type") == "choice" else "text"
+        item = {"type": qtype, "q": str(q.get("q", "")).strip()}
+        if qtype == "choice":
+            opts = q.get("options") or []
+            item["options"] = [str(o) for o in opts if str(o).strip()]
+            if not item["options"]:
+                item["type"] = "text"
+                item.pop("options", None)
+        if item["q"]:
+            clean.append(item)
+    if not clean:
+        return None, text
+    prefix = text[:m.start()].rstrip()
+    return clean, prefix
+
+
 def _execute_agent_calls(text):
     pattern = r"\[CALL:(\S+?)\]([\s\S]*?)\[/CALL\]"
     matches = re.findall(pattern, text)
@@ -335,7 +389,8 @@ def _new_conversation(agent_id=None):
         "title": "新对话",
         "agent_id": agent_id,
         "history": history,
-        "created": time.time()
+        "created": time.time(),
+        "pinned": False
     }
     _save_conversations()
     return cid
@@ -706,8 +761,12 @@ def set_current_agent():
 @app.route("/api/conversations", methods=["GET"])
 def list_conversations():
     result = []
-    for c in sorted(conversations.values(), key=lambda x: x["created"], reverse=True):
-        result.append({"id": c["id"], "title": c["title"], "agent_id": c.get("agent_id")})
+    ordered = sorted(conversations.values(),
+                     key=lambda x: (1 if x.get("pinned") else 0, x["created"]),
+                     reverse=True)
+    for c in ordered:
+        result.append({"id": c["id"], "title": c["title"],
+                       "agent_id": c.get("agent_id"), "pinned": bool(c.get("pinned"))})
     return jsonify(result)
 
 
@@ -717,7 +776,7 @@ def create_conversation():
     agent_id = data.get("agent_id", current_agent_id)
     cid = _new_conversation(agent_id)
     conv = conversations[cid]
-    return jsonify({"id": conv["id"], "title": conv["title"], "agent_id": conv.get("agent_id")})
+    return jsonify({"id": conv["id"], "title": conv["title"], "agent_id": conv.get("agent_id"), "pinned": bool(conv.get("pinned"))})
 
 
 @app.route("/api/conversations/<cid>", methods=["DELETE"])
@@ -737,6 +796,17 @@ def rename_conversation(cid):
     conv["title"] = data.get("title", "新对话")[:50]
     _save_conversations()
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/conversations/<cid>/pin", methods=["PUT"])
+def pin_conversation(cid):
+    conv = _get_conv(cid)
+    if not conv:
+        return jsonify({"error": "对话不存在"}), 404
+    data = request.get_json() or {}
+    conv["pinned"] = bool(data.get("pinned"))
+    _save_conversations()
+    return jsonify({"status": "ok", "pinned": conv["pinned"]})
 
 
 @app.route("/api/conversations/<cid>/messages", methods=["GET"])
@@ -771,6 +841,7 @@ def chat():
     user_input = data.get("message", "").strip()
     images = data.get("images", [])
     web_search_on = bool(data.get("web_search", False))
+    is_ask_answer = bool(data.get("ask_answer", False))
 
     if not user_input and not images:
         return jsonify({"error": "消息不能为空"}), 400
@@ -797,6 +868,8 @@ def chat():
         for img_data in images:
             content_blocks.append({"type": "image_url", "image_url": {"url": img_data}})
         mgr.add_user_message(content_blocks)
+    elif is_ask_answer:
+        mgr.add_user_message(ASK_ANSWER_PREFIX + user_input)
     else:
         mgr.add_user_message(user_input)
 
@@ -819,15 +892,22 @@ def chat():
     callable_prompt = _build_callable_prompt(callable_agents)
 
     def _build_request_history():
-        if not callable_prompt:
-            return history
-        req_history = list(history)
+        date_note = ("\n\n【当前真实日期】今天是 " + web_search._current_date_str()
+                     + "（由系统提供，准确无误）。涉及今天/日期/时效的问题一律以此为准。")
+        extra = (callable_prompt or "") + ASK_PROMPT + date_note
+        req_history = []
+        for m in history:
+            c = m.get("content")
+            if isinstance(c, str) and c.startswith(ASK_ANSWER_PREFIX):
+                m = dict(m)
+                m["content"] = c[len(ASK_ANSWER_PREFIX):]
+            req_history.append(m)
         sys_idx = next((i for i, m in enumerate(req_history) if m["role"] == "system"), -1)
         if sys_idx >= 0:
             req_history[sys_idx] = dict(req_history[sys_idx])
-            req_history[sys_idx]["content"] = req_history[sys_idx]["content"] + callable_prompt
+            req_history[sys_idx]["content"] = req_history[sys_idx]["content"] + extra
         else:
-            req_history.insert(0, {"role": "system", "content": callable_prompt.strip()})
+            req_history.insert(0, {"role": "system", "content": extra.strip()})
         return req_history
 
     def _inject_search(req_history, search_result):
@@ -877,9 +957,13 @@ def chat():
 
     def _run_agentic_search(q_out):
         try:
+            q_out.put(("status", "正在判断是否需要联网…"))
+            if not web_search.should_search(user_input, _llm_call):
+                q_out.put(("skip", None))
+                return
             count = runtime_config.get("web_search_count", 5)
             result = web_search.agentic_search(
-                user_input, _llm_call, max_results=count, max_rounds=2,
+                user_input, _llm_call, max_results=count, max_rounds=1,
                 progress=lambda msg: q_out.put(("status", msg)),
             )
             q_out.put(("done", result))
@@ -893,6 +977,7 @@ def chat():
                 q_out = queue.Queue()
                 worker = threading.Thread(target=_run_agentic_search, args=(q_out,), daemon=True)
                 worker.start()
+                skipped = False
                 while True:
                     if stream_state["cancel"].is_set():
                         break
@@ -903,11 +988,17 @@ def chat():
                     if kind == "status":
                         st = json.dumps({"search_status": val}, ensure_ascii=False)
                         yield f"data: {st}\n\n"
+                    elif kind == "skip":
+                        skipped = True
+                        break
                     elif kind == "done":
                         search_result = val
                         break
                 stream_state["search_result"] = search_result
-                if not (search_result and search_result.get("ok")):
+                if skipped:
+                    st = json.dumps({"search_status": "判断本次无需联网，直接作答"}, ensure_ascii=False)
+                    yield f"data: {st}\n\n"
+                elif not (search_result and search_result.get("ok")):
                     st = json.dumps({"search_status": "联网检索未获得有效结果，将基于已有知识回答"}, ensure_ascii=False)
                     yield f"data: {st}\n\n"
             resp = send_chat_request(
@@ -966,6 +1057,12 @@ def chat():
                 mgr._trim_history()
             else:
                 mgr._trim_history()
+
+            ask_questions, ask_prefix = _parse_ask_block(stream_state["full_reply"])
+            if ask_questions:
+                ask_data = json.dumps({"ask": {"questions": ask_questions, "prefix": ask_prefix}}, ensure_ascii=False)
+                yield f"data: {ask_data}\n\n"
+
             _sr = stream_state.get("search_result")
             if _sr and _sr.get("sources"):
                 src_data = json.dumps({"sources": _sr["sources"]}, ensure_ascii=False)
