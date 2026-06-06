@@ -30,6 +30,44 @@ def _key_listener():
             break
 
 
+def start_abort_listener():
+    global generating, abort_flag
+
+    abort_flag = False
+    generating = True
+    listener_stop.clear()
+
+    t = threading.Thread(target=_key_listener, daemon=True)
+    t.start()
+
+
+def stop_abort_listener():
+    global generating
+
+    generating = False
+    listener_stop.set()
+
+
+def pause_listener():
+    global generating
+    generating = False
+    listener_stop.set()
+
+
+def resume_listener():
+    global generating
+    if abort_flag:
+        return
+    generating = True
+    listener_stop.clear()
+    t = threading.Thread(target=_key_listener, daemon=True)
+    t.start()
+
+
+def is_aborted():
+    return abort_flag
+
+
 class TerminalManager:
     def __init__(self):
         self._listener = None

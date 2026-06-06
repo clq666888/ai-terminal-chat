@@ -17,14 +17,28 @@ python3 start.py
 |------|------|
 | `/exit` | 退出 |
 | `/clear` | 清空记忆 |
-| `/undo` | 撤销上一轮 |
+| `/undo [N]` | 撤回最近 N 轮对话及文件改动（默认1轮） |
 | `/compress` | 压缩历史（减少 token） |
 | `/reload` | 热重载配置和智能体 |
 | `/agents` | 查看智能体列表 |
+| `/diff` | 查看 AI 的文件改动记录 |
 | `/mcp` | 查看已加载的 MCP 工具 |
+| `/list` | 显示所有指令 |
 | `@名称` | 切换智能体 |
 | `@名称 消息` | 切换并直接对话 |
 | `"""` | 多行输入模式 |
+| `Ctrl+Q` | 中断 AI 生成或工具执行 |
+
+## 权限等级
+
+通过 `config.txt` 的 `[权限]` 字段控制 AI 可使用的工具范围：
+
+| 等级 | 说明 |
+|------|------|
+| 0 | 仅聊天，不允许使用任何工具 |
+| 1 | 只读（read_file、list_dir、search_files、ask_user） |
+| 2 | 读写，文件修改和命令执行需用户确认 |
+| 3 | 完全自动，所有工具无需确认（默认） |
 
 ## 内置工具
 
@@ -35,10 +49,11 @@ AI 可以主动调用以下工具：
 | `read_file` | 读取文件 |
 | `edit_file` | 写入/创建/删除文件 |
 | `run_command` | 执行命令 |
-| `list_dir` | 列出目录 |
-| `search_files` | 搜索文本 |
+| `list_dir` | 列出目录（支持过滤隐藏文件） |
+| `search_files` | 搜索文本（支持过滤隐藏文件） |
 | `call_agent` | 调用其他智能体 |
 | `ask_user` | 向用户提问 |
+| `get_diff` | 查看本次会话中 AI 的文件改动记录 |
 
 ## MCP 扩展
 
@@ -108,6 +123,8 @@ read_file, edit_file, run_command, list_dir, search_files
 
 留空的字段自动继承 `global.txt`。详见 `agents/创建智能体须知.md`。
 
+> 注意：`agents/` 目录下除 `global.txt` 和 `创建智能体须知.md` 外的 `.txt` 文件均不会提交到仓库（已通过 `.gitignore` 忽略），每个用户可自由创建自己的智能体而不影响他人。
+
 ## 配置文件
 
 `config.txt` 中可调整运行参数：
@@ -115,11 +132,13 @@ read_file, edit_file, run_command, list_dir, search_files
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | 最大记忆轮数 | 50 | 超出后自动丢弃早期对话 |
-| 最大工具调用轮数 | 20 | 单次对话最多调用工具次数 |
+| 最大工具调用轮数 | 50 | 单次对话最多调用工具次数 |
 | 连接超时秒数 | 10 | API 连接超时 |
 | 响应超时秒数 | 120 | API 响应超时 |
 | 历史压缩阈值轮数 | 30 | 自动触发压缩的轮数 |
-| 压缩保留最近轮数 | 5 | 压缩后保留的最近对话轮数 |
+| 压缩保留最近轮数 | 10 | 压缩后保留的最近对话轮数 |
+| diff保存最大轮数 | 10 | AI 文件改动记录保留的轮数 |
+| 权限 | 3 | 工具权限等级（0-3） |
 
 修改后输入 `/reload` 立即生效。
 
@@ -143,7 +162,8 @@ api调用脚本/
 ├── config_manager.py     # 配置解析
 ├── agents/               # 智能体配置
 │   ├── global.txt        # 全局配置（必填）
-│   └── *.txt             # 自定义智能体
+│   ├── 创建智能体须知.md  # 智能体创建说明
+│   └── *.txt             # 自定义智能体（不提交到仓库）
 ├── mcp/                  # MCP 扩展
 │   ├── mcp_client.py     # MCP 通信核心
 │   └── servers/          # MCP 配置文件（.json）
@@ -152,12 +172,14 @@ api调用脚本/
 │   ├── chat_core.py      # API 请求与历史管理
 │   ├── tools.py          # 工具定义与执行
 │   ├── terminal_control.py
+│   ├── spinner.py        # 思考动画
 │   └── agent_manager.py
 └── windows/              # Windows 版本
     ├── api_chat.py
     ├── chat_core.py
     ├── tools.py
     ├── terminal_control.py
+    ├── spinner.py
     └── agent_manager.py
 ```
 

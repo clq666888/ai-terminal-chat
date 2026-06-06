@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 mcp/servers/*.json
+
+# agents 目录：只保留 global.txt 和 创建智能体须知.md
+agents/*.txt
+!agents/global.txt

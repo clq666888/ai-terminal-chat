@@ -10,6 +10,8 @@ from chat_core import parse_stream_chunk
 generating = False
 abort_flag = False
 listener_stop = threading.Event()
+_old_termios_global = None
+_listener_global = None
 
 
 def _key_listener():
@@ -32,6 +34,76 @@ def _key_listener():
             sys.stdout.write("\n\n🛑 已中断生成")
             sys.stdout.flush()
             break
+
+
+def start_abort_listener():
+    global generating, abort_flag, _old_termios_global, _listener_global
+
+    fd = sys.stdin.fileno()
+    _old_termios_global = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    new_attr = termios.tcgetattr(fd)
+    new_attr[0] &= ~(termios.IXON | termios.IXOFF)
+    termios.tcsetattr(fd, termios.TCSANOW, new_attr)
+
+    abort_flag = False
+    generating = True
+    listener_stop.clear()
+
+    _listener_global = threading.Thread(target=_key_listener, daemon=True)
+    _listener_global.start()
+
+
+def stop_abort_listener():
+    global generating, _old_termios_global, _listener_global
+
+    generating = False
+    listener_stop.set()
+
+    if _listener_global:
+        _listener_global.join(timeout=0.3)
+        _listener_global = None
+
+    if _old_termios_global:
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _old_termios_global)
+            termios.tcflush(sys.stdin, termios.TCIOFLUSH)
+        except Exception:
+            pass
+        _old_termios_global = None
+
+
+def pause_listener():
+    global generating
+    generating = False
+    listener_stop.set()
+    if _listener_global:
+        _listener_global.join(timeout=0.3)
+    if _old_termios_global:
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _old_termios_global)
+        except Exception:
+            pass
+
+
+def resume_listener():
+    global generating, _listener_global
+    if abort_flag:
+        return
+    fd = sys.stdin.fileno()
+    tty.setcbreak(fd)
+    new_attr = termios.tcgetattr(fd)
+    new_attr[0] &= ~(termios.IXON | termios.IXOFF)
+    termios.tcsetattr(fd, termios.TCSANOW, new_attr)
+
+    generating = True
+    listener_stop.clear()
+    _listener_global = threading.Thread(target=_key_listener, daemon=True)
+    _listener_global.start()
+
+
+def is_aborted():
+    return abort_flag
 
 
 class TerminalManager:

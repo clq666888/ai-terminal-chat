@@ -9,7 +9,8 @@ from chat_core import (
     load_api_key, load_system_prompt, HistoryManager,
     send_chat_request, parse_stream_chunk, parse_stream_response
 )
-from terminal_control import TerminalManager, stream_output
+from terminal_control import TerminalManager, stream_output, start_abort_listener, stop_abort_listener, is_aborted, pause_listener, resume_listener
+from spinner import Spinner
 from tools import TOOLS_DEFINITION, ToolExecutor
 from agent_manager import (
     list_agents, get_agent, get_global_agent,
@@ -48,7 +49,10 @@ TOOL_RULES = """
 3. 写入文件时给出完整内容，不要省略
 4. 当用户只是聊天、提问、讨论时，直接回答即可，不需要调用工具
 5. 不要在回复中暴露 API Key、密码等敏感信息
-6. 当你需要向用户提问、确认方案、或获取补充信息时，必须调用 ask_user 工具，禁止在回复文本中直接写问题等待用户回答。ask_user 的结果会立即返回给你，你可以基于用户的回答继续执行后续操作，整个过程不会中断当前任务"""
+6. 当你需要向用户提问、确认方案、或获取补充信息时，必须调用 ask_user 工具，禁止在回复文本中直接写问题等待用户回答。ask_user 的结果会立即返回给你，你可以基于用户的回答继续执行后续操作，整个过程不会中断当前任务
+7. 当用户询问你之前对文件做了什么改动、某个文件的修改历史、或需要你回顾自己的操作时，使用 get_diff 工具查询，不要凭记忆猜测
+8. 优先使用工具获取准确信息，不要在没有依据的情况下猜测文件内容或改动情况
+9. 你只有上面列出的工具能力，没有任何其他能力（没有联网搜索、没有知识图谱、没有长期记忆存储）。不要向用户声称你拥有未列出的功能"""
 
 TOOL_DESC_MAP = {
     "read_file": "读取文件内容",
@@ -58,6 +62,7 @@ TOOL_DESC_MAP = {
     "search_files": "在文件中搜索文本",
     "call_agent": "调用其他智能体执行子任务",
     "ask_user": "向用户提问澄清需求",
+    "get_diff": "查看文件改动记录",
 }
 
 TOOL_DISPLAY_MAP = {
@@ -68,6 +73,7 @@ TOOL_DISPLAY_MAP = {
     "search_files": "搜索文件",
     "call_agent": "调用智能体",
     "ask_user": "用户提问",
+    "get_diff": "查看改动",
 }
 
 global_agent = get_global_agent()
@@ -91,7 +97,10 @@ if not global_agent["model"]:
     print("   请在 agents/global.txt 的 [模型] 中填写模型名称")
     sys.exit(1)
 
-AI_NAME = global_agent["name"]
+def get_ai_name():
+    if current_agent:
+        return f"@{current_agent['id']}"
+    return f"@{global_agent['id']}"
 
 tool_executor = ToolExecutor(WORK_DIR, config=_cfg)
 
@@ -116,6 +125,9 @@ def build_system_prompt(agent_config):
     perm = tool_executor.permission
     if perm == 0:
         prompt = base + f"\n\n当前权限等级: 0（仅聊天）\n你没有任何工具权限，不能读取文件、不能修改文件、不能执行命令。请直接与用户对话。\n如果用户要求你操作文件或执行命令，请告知用户当前权限不足，建议在 config.txt 中将权限调高后执行 /reload。\n工作目录: {WORK_DIR}"
+        model_name = current_model if current_model else (agent_config.get("model") or global_agent.get("model", ""))
+        display_model = model_name.split("/")[-1] if "/" in model_name else model_name
+        prompt += f"\n\n[内部信息，仅在用户主动询问时使用] 当前模型: {display_model}"
         return prompt
     elif perm == 1:
         tool_names = [t["function"]["name"] for t in current_tools]
@@ -139,6 +151,10 @@ def build_system_prompt(agent_config):
             desc = a.get("when_to_call", "") or a.get("system_prompt", "")[:50]
             agent_info += f"- @{a['id']} ({a['name']}): {desc}\n"
         prompt += agent_info
+
+    model_name = current_model if current_model else (agent_config.get("model") or global_agent.get("model", ""))
+    display_model = model_name.split("/")[-1] if "/" in model_name else model_name
+    prompt += f"\n\n[内部信息，仅在用户主动询问时使用] 当前模型: {display_model}"
 
     return prompt
 
@@ -251,10 +267,7 @@ def switch_agent(agent_id, silent=False):
     current_history.append({"role": "system", "content": system_content})
 
     if not silent:
-        print(f"\n🔄 已切换到: {current_agent['name']} (@{current_agent['id']})")
-        tool_names = [t["function"]["name"] for t in current_tools]
-        display = " | ".join(TOOL_DISPLAY_MAP.get(n, n) for n in tool_names)
-        print(f"🔧 可用工具: {display}")
+        print(f"\n🔄 已切换到: @{current_agent['id']}")
     return True
 
 
@@ -296,6 +309,11 @@ def format_tool_log(func_name, func_args):
     elif func_name == "ask_user":
         question = args.get("question", "?")
         return f"  ❓ 提问: {question}"
+    elif func_name == "get_diff":
+        path = args.get("path", "")
+        if path:
+            return f"  📄 查看改动: {path}"
+        return f"  📄 查看改动记录"
     elif mcp_mgr.is_mcp_tool(func_name):
         return f"  🔌 MCP: {func_name}"
     else:
@@ -303,7 +321,7 @@ def format_tool_log(func_name, func_args):
 
 
 def chat(user_input):
-    mgr = HistoryManager(current_history, MAX_HISTORY_ROUNDS, AI_NAME)
+    mgr = HistoryManager(current_history, MAX_HISTORY_ROUNDS, get_ai_name())
     global current_tools
     mcp_defs = mcp_mgr.get_tools_definition()
     if mcp_defs and not any(mcp_mgr.is_mcp_tool(t["function"]["name"]) for t in current_tools):
@@ -319,7 +337,22 @@ def chat(user_input):
 
     mgr.add_user_message(user_input)
 
+    start_abort_listener()
+    try:
+        return _chat_loop(mgr, effective_tools)
+    finally:
+        stop_abort_listener()
+
+
+def _chat_loop(mgr, effective_tools):
     for round_num in range(MAX_TOOL_ROUNDS):
+        from terminal_control import abort_flag
+        if abort_flag:
+            mgr.add_interrupt_hint()
+            return None
+
+        spinner = Spinner("AI 正在思考")
+        spinner.start()
         try:
             resp = send_chat_request(
                 current_api_url, current_api_key, current_history, current_model,
@@ -327,12 +360,14 @@ def chat(user_input):
                 connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"]
             )
         except requests.RequestException as e:
+            spinner.stop()
             print(f"\n❌ 网络请求异常: {e}")
             if round_num == 0:
                 mgr.rollback_user_message()
             return None
 
         if resp.status_code != 200:
+            spinner.stop()
             print(f"\n❌ 请求失败 [{resp.status_code}]: {resp.text}")
             if round_num == 0:
                 mgr.rollback_user_message()
@@ -343,30 +378,34 @@ def chat(user_input):
         aborted = False
         header_printed = False
 
-        with TerminalManager():
-            for event in parse_stream_response(resp):
-                if event[0] == "content":
-                    if not header_printed:
-                        sys.stdout.write(f"\n{AI_NAME}: ")
-                        sys.stdout.flush()
-                        header_printed = True
-                    from terminal_control import abort_flag
-                    if abort_flag:
-                        aborted = True
-                        break
-                    sys.stdout.write(event[1])
+        for event in parse_stream_response(resp):
+            from terminal_control import abort_flag
+            if abort_flag:
+                spinner.stop()
+                aborted = True
+                break
+
+            if event[0] == "content":
+                if not header_printed:
+                    spinner.stop()
+                    sys.stdout.write(f"\n{get_ai_name()}: ")
                     sys.stdout.flush()
-                    final_text += event[1]
+                    header_printed = True
+                sys.stdout.write(event[1])
+                sys.stdout.flush()
+                final_text += event[1]
 
-                elif event[0] == "tool_calls":
-                    got_tool_calls = True
-                    tool_calls = event[1]
-                    tc_content = event[2]
-                    break
+            elif event[0] == "tool_calls":
+                spinner.stop()
+                got_tool_calls = True
+                tool_calls = event[1]
+                tc_content = event[2]
+                break
 
-                elif event[0] == "done":
-                    final_text = event[1]
-                    break
+            elif event[0] == "done":
+                spinner.stop()
+                final_text = event[1]
+                break
 
         if aborted:
             if header_printed:
@@ -386,7 +425,7 @@ def chat(user_input):
             return final_text
 
         if tc_content and not header_printed:
-            print(f"\n{AI_NAME}: {tc_content}")
+            print(f"\n{get_ai_name()}: {tc_content}")
         elif header_printed:
             sys.stdout.write("\n")
 
@@ -397,7 +436,14 @@ def chat(user_input):
         }
         mgr.save_tool_call_message(assistant_msg)
 
+        pause_listener()
         for tc in tool_calls:
+            from terminal_control import abort_flag
+            if abort_flag:
+                print("\n\n🛑 已中断工具执行")
+                mgr.add_interrupt_hint()
+                return None
+
             func_name = tc["function"]["name"]
             func_args = tc["function"]["arguments"]
             tc_id = tc["id"]
@@ -418,6 +464,7 @@ def chat(user_input):
                 print(format_tool_log(func_name, func_args))
                 result = tool_executor.execute(func_name, func_args)
             mgr.save_tool_result(tc_id, result)
+        resume_listener()
 
         continue
 
@@ -473,7 +520,8 @@ def main():
     while True:
         try:
             agent_tag = f"@{current_agent['id']}" if current_agent and current_agent["id"] != "global" else ""
-            prompt = f"你{agent_tag}: "
+            round_num = tool_executor.current_round + 1
+            prompt = f"\033[90m[{round_num}]\033[0m 你{agent_tag}: "
             user_text = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见！")
@@ -511,24 +559,82 @@ def main():
 
 
 
-        if user_text.lower() == "/undo":
+        if user_text.lower().startswith("/undo"):
+            undo_arg = user_text[5:].strip()
+            undo_n = 1
+            if undo_arg:
+                try:
+                    undo_n = int(undo_arg)
+                    if undo_n < 1:
+                        print("⚠️ 请输入正整数\n")
+                        continue
+                except ValueError:
+                    print("⚠️ 格式错误，用法: /undo 或 /undo N\n")
+                    continue
+
             if len(current_history) <= 1:
                 print("⚠️ 没有可撤销的对话\n")
                 continue
-            removed = 0
-            while len(current_history) > 1:
-                last = current_history[-1]
-                if last["role"] == "user" and removed > 0:
-                    current_history.pop()
-                    removed += 1
+
+            actual_n, file_preview = tool_executor.get_undo_preview(undo_n)
+            history_rounds = 0
+            tmp_hist = list(current_history)
+            for _ in range(undo_n):
+                if len(tmp_hist) <= 1:
                     break
-                current_history.pop()
-                removed += 1
-            print(f"↩️  已撤销上一轮对话（移除 {removed} 条消息）\n")
+                removed_one = False
+                while len(tmp_hist) > 1:
+                    last = tmp_hist[-1]
+                    if last["role"] == "user" and removed_one:
+                        tmp_hist.pop()
+                        break
+                    tmp_hist.pop()
+                    removed_one = True
+                history_rounds += 1
+
+            print(f"\n\033[31m⚠️  警告：此操作不可撤回！\033[0m")
+            print(f"  将撤回最近 {max(undo_n, history_rounds)} 轮对话记录")
+            if file_preview:
+                print(f"  并恢复以下 {len(file_preview)} 个文件:")
+                for fp, desc in file_preview:
+                    print(f"    - {fp} ({desc})")
+            else:
+                print(f"  （无文件改动需要恢复）")
+            try:
+                confirm = input("\n  确认执行？(y/n): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n已取消")
+                continue
+            if confirm not in ("y", "yes"):
+                print("已取消\n")
+                continue
+
+            restored = tool_executor.undo_rounds(undo_n)
+
+            removed_msgs = 0
+            for _ in range(undo_n):
+                if len(current_history) <= 1:
+                    break
+                removed_one = False
+                while len(current_history) > 1:
+                    last = current_history[-1]
+                    if last["role"] == "user" and removed_one:
+                        current_history.pop()
+                        removed_msgs += 1
+                        break
+                    current_history.pop()
+                    removed_msgs += 1
+                    removed_one = True
+
+            print(f"\n↩️  已撤回 {history_rounds} 轮对话（移除 {removed_msgs} 条消息）")
+            if restored:
+                for fp, status in restored:
+                    print(f"  📄 {fp} → {status}")
+            print()
             continue
 
         if user_text.lower() == "/compress":
-            mgr = HistoryManager(current_history, MAX_HISTORY_ROUNDS, AI_NAME)
+            mgr = HistoryManager(current_history, MAX_HISTORY_ROUNDS, get_ai_name())
             rounds = mgr.count_rounds()
             if rounds <= COMPRESS_KEEP_RECENT:
                 print(f"⚠️ 当前仅 {rounds} 轮对话，无需压缩\n")
@@ -540,7 +646,7 @@ def main():
             print("\n📋 可用指令:")
             print("  /exit     - 退出程序")
             print("  /clear    - 清空当前对话记忆")
-            print("  /undo     - 撤销上一轮对话")
+            print("  /undo [N]  - 撤回最近 N 轮对话及文件改动（默认1轮）")
             print("  /compress - 压缩历史记忆（减少 token 占用）")
             print("  /reload   - 重新加载配置和智能体")
             print("  /agents   - 查看所有智能体列表")
@@ -552,7 +658,7 @@ def main():
             print("  @名称     - 切换到指定智能体")
             print("  @名称 内容 - 切换并直接对话")
             print('  \"\"\"       - 进入多行输入模式')
-            print("  Ctrl+Q    - 中断 AI 正在生成的回复")
+            print("  Ctrl+Q    - 中断 AI 生成或工具执行")
             print()
             continue
 
@@ -581,7 +687,7 @@ def main():
                 display = []
                 for grp in groups:
                     ago = cur - grp[0]["round"]
-                    when = "\u672c\u8f6e\u5bf9\u8bdd" if ago == 0 else f"\u524d{ago}\u8f6e\u5bf9\u8bdd"
+                    when = f"\u524d{ago + 1}\u8f6e\u5bf9\u8bdd"
                     if len(grp) <= 3:
                         for r in grp:
                             act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
@@ -593,7 +699,7 @@ def main():
 
             def _show_detail(r, cur):
                 ago = cur - r["round"]
-                when = "\u672c\u8f6e\u5bf9\u8bdd" if ago == 0 else f"\u524d{ago}\u8f6e\u5bf9\u8bdd"
+                when = f"\u524d{ago + 1}\u8f6e\u5bf9\u8bdd"
                 act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
                 act = act_map.get(r["action"], r["action"])
                 print(f"\n\U0001f4c4 [{r['time']}] \u4e8e{when}\u4e2d{act} {r['path']}")
@@ -695,7 +801,7 @@ def main():
                         print(f"\n\U0001f4c4 {file_path} \u7684\u6539\u52a8\u5386\u53f2\uff08\u5171 {len(file_records)} \u6761\uff09:")
                         for i, r in enumerate(file_records, 1):
                             ago = cur - r["round"]
-                            when = "\u672c\u8f6e\u5bf9\u8bdd" if ago == 0 else f"\u524d{ago}\u8f6e\u5bf9\u8bdd"
+                            when = f"\u524d{ago + 1}\u8f6e\u5bf9\u8bdd"
                             act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
                             act = act_map.get(r["action"], r["action"])
                             print(f"  {i}. [{r['time']}] \u4e8e{when}\u4e2d{act}")

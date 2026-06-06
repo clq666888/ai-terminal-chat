@@ -211,6 +211,8 @@ def parse_stream_response(response):
         except Exception:
             continue
 
+        if not chunk.get("choices"):
+            continue
         choice = chunk["choices"][0]
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason") or finish_reason
@@ -255,6 +257,8 @@ def send_chat_request(base_url, api_key, messages, model, temperature=0.7, tools
     url = _normalize_base_url(base_url)
     headers, payload = build_request_payload(api_key, messages, model, temperature, stream=stream, tools=tools)
     if stream:
-        return requests.post(url, json=payload, headers=headers, stream=True, timeout=(connect_timeout, read_timeout))
+        resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=(connect_timeout, read_timeout))
+        resp.encoding = "utf-8"
+        return resp
     else:
         return requests.post(url, json=payload, headers=headers, timeout=(connect_timeout, read_timeout))

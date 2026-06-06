@@ -84,7 +84,7 @@ TOOLS_DEFINITION = [
         "type": "function",
         "function": {
             "name": "list_dir",
-            "description": "列出目录下的文件和子目录。",
+            "description": "列出目录下的文件和子目录。默认跳过隐藏文件（以.开头的文件和目录），设置 include_hidden=true 可包含隐藏文件。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -95,6 +95,10 @@ TOOLS_DEFINITION = [
                     "recursive": {
                         "type": "boolean",
                         "description": "是否递归列出子目录，默认false"
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "是否包含隐藏文件和目录（以.开头的），默认false"
                     }
                 },
                 "required": []
@@ -105,7 +109,7 @@ TOOLS_DEFINITION = [
         "type": "function",
         "function": {
             "name": "search_files",
-            "description": "在文件中搜索匹配的文本（类似 grep）。返回匹配的文件名和行内容。",
+            "description": "在文件中搜索匹配的文本（类似 grep）。返回匹配的文件名和行内容。默认跳过隐藏文件和隐藏目录，设置 include_hidden=true 可搜索隐藏文件。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -120,6 +124,10 @@ TOOLS_DEFINITION = [
                     "file_pattern": {
                         "type": "string",
                         "description": "文件名过滤（glob），如 '*.py'"
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "是否搜索隐藏文件和隐藏目录（以.开头的），默认false"
                     }
                 },
                 "required": ["pattern"]
@@ -144,6 +152,27 @@ TOOLS_DEFINITION = [
                     }
                 },
                 "required": ["agent_id", "message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_diff",
+            "description": "查看本次会话中 AI 对文件的改动记录。不传参数返回所有改动文件的概览列表；传 path 返回该文件的详细 diff（逐行对比）；传 round_offset 可查看指定轮次（如 round_offset=3 表示前3轮）的改动。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "可选，查看指定文件的详细 diff"
+                    },
+                    "round_offset": {
+                        "type": "integer",
+                        "description": "可选，查看前 N 轮的改动（如 1 表示上一轮，3 表示前3轮）。不传则查看所有轮次"
+                    }
+                },
+                "required": []
             }
         }
     },
@@ -216,18 +245,67 @@ class ToolExecutor:
             "list_dir": self._list_dir,
             "search_files": self._search_files,
             "ask_user": self._ask_user,
+            "get_diff": self._get_diff,
         }.get(tool_name)
 
         if not handler:
             return f"[错误] 未知工具: {tool_name}"
 
-        if self.permission == 0:
+        if self.permission == 0 and tool_name != "get_diff":
             return f"[拒绝] 当前权限等级为 0，不允许使用任何工具"
-        if self.permission == 1 and tool_name not in ("read_file", "list_dir", "search_files", "ask_user"):
+        if self.permission == 1 and tool_name not in ("read_file", "list_dir", "search_files", "ask_user", "get_diff"):
             return f"[拒绝] 当前权限等级为 1（只读），不允许执行 {tool_name}"
 
         return handler(args)
 
+
+    def _get_diff(self, args):
+        path = args.get("path")
+        round_offset = args.get("round_offset")
+        records = [r for r in self.diff_records if r["old"] != r["new"]]
+        if round_offset:
+            target_round = self.current_round - round_offset
+            records = [r for r in records if r["round"] == target_round]
+        if path:
+            records = [r for r in records if r["path"] == path or r["path"].endswith("/" + path) or path.endswith("/" + r["path"])]
+            if not records:
+                return f"未找到 {path} 的改动记录"
+            result = []
+            for r in records:
+                ago = self.current_round - r["round"]
+                when = f"前{ago + 1}轮"
+                act_map = {"创建": "创建", "覆盖": "修改", "删除": "删除"}
+                act = act_map.get(r["action"], r["action"])
+                result.append(f"[{when}] {act} {r['path']}")
+                old_lines = r["old"].splitlines()
+                new_lines = r["new"].splitlines()
+                opcodes = difflib.SequenceMatcher(None, old_lines, new_lines).get_opcodes()
+                for tag, i1, i2, j1, j2 in opcodes:
+                    if tag == "equal":
+                        continue
+                    elif tag == "delete":
+                        for k in range(i1, i2):
+                            result.append(f"  {k+1:4d} - {old_lines[k]}")
+                    elif tag == "insert":
+                        for k in range(j1, j2):
+                            result.append(f"  {k+1:4d} + {new_lines[k]}")
+                    elif tag == "replace":
+                        for k in range(i1, i2):
+                            result.append(f"  {k+1:4d} - {old_lines[k]}")
+                        for k in range(j1, j2):
+                            result.append(f"  {k+1:4d} + {new_lines[k]}")
+            return "\n".join(result)
+        else:
+            if not records:
+                return "本次会话暂无文件改动记录"
+            result = [f"文件改动记录（共 {len(records)} 条）:"]
+            for r in records:
+                ago = self.current_round - r["round"]
+                when = f"前{ago + 1}轮"
+                act_map = {"创建": "创建", "覆盖": "修改", "删除": "删除"}
+                act = act_map.get(r["action"], r["action"])
+                result.append(f"  [{when}] {act} {r['path']}")
+            return "\n".join(result)
 
     def _ask_user(self, args):
         question = args.get("question", "")
@@ -440,6 +518,55 @@ class ToolExecutor:
     def clear_diff_records(self):
         self.diff_records.clear()
 
+    def undo_rounds(self, n):
+        target_rounds = set(range(self.current_round, self.current_round - n, -1))
+        affected = [r for r in self.diff_records if r['round'] in target_rounds]
+        restored = []
+        if affected:
+            file_map = {}
+            for r in affected:
+                p = r['path']
+                if p not in file_map or r['round'] < file_map[p]['round']:
+                    file_map[p] = r
+            for p, r in file_map.items():
+                full_path = self._resolve_path(p)
+                try:
+                    if r['old'] == '':
+                        if os.path.isfile(full_path):
+                            os.remove(full_path)
+                        restored.append((p, '删除'))
+                    else:
+                        parent = os.path.dirname(full_path) or '.'
+                        if parent != '.' and not os.path.exists(parent):
+                            os.makedirs(parent, exist_ok=True)
+                        with open(full_path, 'w', encoding='utf-8') as f:
+                            f.write(r['old'])
+                        restored.append((p, '恢复'))
+                except Exception as e:
+                    restored.append((p, f'失败: {e}'))
+        self.diff_records = [r for r in self.diff_records if r['round'] not in target_rounds]
+        self.current_round = max(self.current_round - n, 0)
+        return restored
+
+
+
+    def get_undo_preview(self, n):
+        target_rounds = set(range(self.current_round, self.current_round - n, -1))
+        affected = [r for r in self.diff_records if r['round'] in target_rounds]
+        if not affected:
+            return n, []
+        file_map = {}
+        for r in affected:
+            p = r['path']
+            if p not in file_map or r['round'] < file_map[p]['round']:
+                file_map[p] = r
+        files = []
+        for p, r in file_map.items():
+            if r['old'] == '':
+                files.append((p, '将删除（此文件由 AI 创建）'))
+            else:
+                files.append((p, '将恢复到修改前'))
+        return n, files
 
     def _run_command(self, args):
         command = args["command"]
@@ -477,6 +604,7 @@ class ToolExecutor:
     def _list_dir(self, args):
         path = self._resolve_path(args.get("path", "."))
         recursive = args.get("recursive", False)
+        include_hidden = args.get("include_hidden", False)
         if not os.path.exists(path):
             return f"[错误] 目录不存在: {path}"
         if not os.path.isdir(path):
@@ -486,7 +614,8 @@ class ToolExecutor:
             result_lines = []
             if recursive:
                 for root, dirs, files in os.walk(path):
-                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    if not include_hidden:
+                        dirs[:] = [d for d in dirs if not d.startswith(".")]
                     rel = os.path.relpath(root, path)
                     level = 0 if rel == "." else rel.count(os.sep) + 1
                     if level > self.config.get("目录递归最大层级", 4):
@@ -495,13 +624,13 @@ class ToolExecutor:
                     dirname = os.path.basename(root) + "/" if rel != "." else "./"
                     result_lines.append(f"{indent}{dirname}")
                     for f in sorted(files):
-                        if f.startswith("."):
+                        if not include_hidden and f.startswith("."):
                             continue
                         result_lines.append(f"{indent}  {f}")
             else:
                 entries = sorted(os.listdir(path))
                 for entry in entries:
-                    if entry.startswith("."):
+                    if not include_hidden and entry.startswith("."):
                         continue
                     full = os.path.join(path, entry)
                     suffix = "/" if os.path.isdir(full) else ""
@@ -514,6 +643,7 @@ class ToolExecutor:
         pattern = args["pattern"]
         search_path = self._resolve_path(args.get("path", "."))
         file_pattern = args.get("file_pattern", "*")
+        include_hidden = args.get("include_hidden", False)
 
         if not os.path.exists(search_path):
             return f"[错误] 路径不存在: {search_path}"
@@ -525,9 +655,10 @@ class ToolExecutor:
 
         matches = []
         for root, dirs, files in os.walk(search_path):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            if not include_hidden:
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
             for fname in files:
-                if fname.startswith("."):
+                if not include_hidden and fname.startswith("."):
                     continue
                 if not fnmatch.fnmatch(fname, file_pattern):
                     continue
