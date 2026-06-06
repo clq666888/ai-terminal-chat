@@ -6,7 +6,7 @@ import requests
 
 from chat_core import (
     load_api_key, load_system_prompt, HistoryManager,
-    send_chat_request, parse_stream_chunk
+    send_chat_request, parse_stream_chunk, parse_stream_response
 )
 from terminal_control import TerminalManager, stream_output
 from tools import TOOLS_DEFINITION, ToolExecutor
@@ -28,7 +28,7 @@ from mcp_client import get_mcp_manager
 
 _cfg = load_config()
 
-WORK_DIR = os.getcwd()
+WORK_DIR = os.environ.get("POLYAI_USER_CWD", os.getcwd())
 MAX_HISTORY_ROUNDS = _cfg["最大记忆轮数"]
 MAX_TOOL_ROUNDS = _cfg["最大工具调用轮数"]
 COMPRESS_THRESHOLD = _cfg["历史压缩阈值轮数"]
@@ -115,10 +115,24 @@ agent_histories = {}
 def build_system_prompt(agent_config):
     base = agent_config["system_prompt"] if agent_config["system_prompt"] else ""
 
-    tool_names = [t["function"]["name"] for t in current_tools]
-    tool_lines = "\n".join(f"- {name}: {TOOL_DESC_MAP.get(name, name)}" for name in tool_names)
-
-    prompt = base + TOOL_RULES.format(tool_list=tool_lines, work_dir=WORK_DIR)
+    perm = tool_executor.permission
+    if perm == 0:
+        prompt = base + f"\n\n当前权限等级: 0（仅聊天）\n你没有任何工具权限，不能读取文件、不能修改文件、不能执行命令。请直接与用户对话。\n如果用户要求你操作文件或执行命令，请告知用户当前权限不足，建议在 config.txt 中将权限调高后执行 /reload。\n工作目录: {WORK_DIR}"
+        return prompt
+    elif perm == 1:
+        tool_names = [t["function"]["name"] for t in current_tools]
+        tool_lines = "\n".join(f"- {name}: {TOOL_DESC_MAP.get(name, name)}" for name in tool_names)
+        perm_note = "\n\n当前权限等级: 1（只读）\n你只能使用只读工具（read_file、list_dir、search_files、ask_user），不能修改文件或执行命令。\n如果用户要求修改操作，请告知用户当前权限不足，建议在 config.txt 中将权限调高后执行 /reload。"
+        prompt = base + TOOL_RULES.format(tool_list=tool_lines, work_dir=WORK_DIR) + perm_note
+    elif perm == 2:
+        tool_names = [t["function"]["name"] for t in current_tools]
+        tool_lines = "\n".join(f"- {name}: {TOOL_DESC_MAP.get(name, name)}" for name in tool_names)
+        perm_note = "\n\n当前权限等级: 2（读写，需确认）\n你可以使用所有工具，但文件修改和命令执行会弹出确认提示，用户可能拒绝。"
+        prompt = base + TOOL_RULES.format(tool_list=tool_lines, work_dir=WORK_DIR) + perm_note
+    else:
+        tool_names = [t["function"]["name"] for t in current_tools]
+        tool_lines = "\n".join(f"- {name}: {TOOL_DESC_MAP.get(name, name)}" for name in tool_names)
+        prompt = base + TOOL_RULES.format(tool_list=tool_lines, work_dir=WORK_DIR)
 
     callable_agents = [a for a in list_agents() if a.get("callable") and a["id"] != agent_config.get("id", "")]
     if callable_agents and "call_agent" in tool_names:
@@ -138,6 +152,7 @@ def _get_callable_agents():
 
 
 def run_sub_agent(agent_id, message):
+    agent_id = agent_id.lstrip("@")
     target = get_agent(agent_id)
     if not target:
         return f"[错误] 未找到智能体: @{agent_id}"
@@ -295,13 +310,22 @@ def chat(user_input):
     mcp_defs = mcp_mgr.get_tools_definition()
     if mcp_defs and not any(mcp_mgr.is_mcp_tool(t["function"]["name"]) for t in current_tools):
         current_tools = current_tools + mcp_defs
+
+    perm = tool_executor.permission
+    if perm == 0:
+        effective_tools = None
+    elif perm == 1:
+        effective_tools = [t for t in current_tools if t["function"]["name"] in ("read_file", "list_dir", "search_files", "ask_user")]
+    else:
+        effective_tools = current_tools
+
     mgr.add_user_message(user_input)
 
     for round_num in range(MAX_TOOL_ROUNDS):
         try:
             resp = send_chat_request(
                 current_api_url, current_api_key, current_history, current_model,
-                temperature=current_temperature, tools=current_tools, stream=False,
+                temperature=current_temperature, tools=effective_tools, stream=True,
                 connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"]
             )
         except requests.RequestException as e:
@@ -316,76 +340,91 @@ def chat(user_input):
                 mgr.rollback_user_message()
             return None
 
-        data = resp.json()
-        message = data["choices"][0]["message"]
-        finish_reason = data["choices"][0].get("finish_reason", "")
+        got_tool_calls = False
+        final_text = ""
+        aborted = False
+        header_printed = False
 
-        if finish_reason == "tool_calls" or message.get("tool_calls"):
-            if message.get("content"):
-                print(f"\n{AI_NAME}: {message['content']}")
+        with TerminalManager():
+            for event in parse_stream_response(resp):
+                if event[0] == "content":
+                    if not header_printed:
+                        sys.stdout.write(f"\n{AI_NAME}: ")
+                        sys.stdout.flush()
+                        header_printed = True
+                    from terminal_control import abort_flag
+                    if abort_flag:
+                        aborted = True
+                        break
+                    sys.stdout.write(event[1])
+                    sys.stdout.flush()
+                    final_text += event[1]
 
-            tool_calls = message["tool_calls"]
-            assistant_msg = {
-                "role": "assistant",
-                "content": message.get("content") or "",
-                "tool_calls": tool_calls
-            }
-            mgr.save_tool_call_message(assistant_msg)
+                elif event[0] == "tool_calls":
+                    got_tool_calls = True
+                    tool_calls = event[1]
+                    tc_content = event[2]
+                    break
 
-            for tc in tool_calls:
-                func_name = tc["function"]["name"]
-                func_args = tc["function"]["arguments"]
-                tc_id = tc["id"]
+                elif event[0] == "done":
+                    final_text = event[1]
+                    break
 
-                if func_name == "call_agent":
-                    _args = json.loads(func_args) if isinstance(func_args, str) else func_args
-                    _agent_id = _args.get("agent_id", "")
-                    result = run_sub_agent(_agent_id, _args.get("message", ""))
-                    if result.startswith("[错误]"):
-                        print(f"  🤖 @{_agent_id} 调用失败: {result}")
-                    else:
-                        print(f"  🤖 @{_agent_id}:")
-                        print(f"  {result}")
-                elif mcp_mgr.is_mcp_tool(func_name):
-                    print(format_tool_log(func_name, func_args))
-                    result = mcp_mgr.call_tool(func_name, func_args)
+        if aborted:
+            if header_printed:
+                sys.stdout.write("\n")
+            if final_text:
+                mgr.save_assistant_reply(final_text + "\n[此处被用户中断]")
+            mgr.add_interrupt_hint()
+            return None
+
+        if not got_tool_calls:
+            if header_printed:
+                sys.stdout.write("\n")
+            if final_text:
+                mgr.save_assistant_reply(final_text)
+                if COMPRESS_THRESHOLD > 0 and mgr.needs_compression(COMPRESS_THRESHOLD):
+                    _do_compress(mgr, silent=False)
+            return final_text
+
+        if tc_content and not header_printed:
+            print(f"\n{AI_NAME}: {tc_content}")
+        elif header_printed:
+            sys.stdout.write("\n")
+
+        assistant_msg = {
+            "role": "assistant",
+            "content": tc_content or "",
+            "tool_calls": tool_calls
+        }
+        mgr.save_tool_call_message(assistant_msg)
+
+        for tc in tool_calls:
+            func_name = tc["function"]["name"]
+            func_args = tc["function"]["arguments"]
+            tc_id = tc["id"]
+
+            if func_name == "call_agent":
+                _args = json.loads(func_args) if isinstance(func_args, str) else func_args
+                _agent_id = _args.get("agent_id", "")
+                result = run_sub_agent(_agent_id, _args.get("message", ""))
+                if result.startswith("[错误]"):
+                    print(f"  🤖 @{_agent_id} 调用失败: {result}")
                 else:
-                    print(format_tool_log(func_name, func_args))
-                    result = tool_executor.execute(func_name, func_args)
-                mgr.save_tool_result(tc_id, result)
+                    print(f"  🤖 @{_agent_id}:")
+                    print(f"  {result}")
+            elif mcp_mgr.is_mcp_tool(func_name):
+                print(format_tool_log(func_name, func_args))
+                result = mcp_mgr.call_tool(func_name, func_args)
+            else:
+                print(format_tool_log(func_name, func_args))
+                result = tool_executor.execute(func_name, func_args)
+            mgr.save_tool_result(tc_id, result)
 
-            continue
+        continue
 
-        break
-    else:
-        print("\n⚠️ 达到最大工具调用轮数，停止执行")
-        return None
-
-    try:
-        stream_resp = send_chat_request(
-            current_api_url, current_api_key, current_history, current_model,
-            temperature=current_temperature, tools=None, stream=True,
-            connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"]
-        )
-    except requests.RequestException as e:
-        print(f"\n❌ 流式请求异常: {e}")
-        return None
-
-    if stream_resp.status_code != 200:
-        print(f"\n❌ 请求失败 [{stream_resp.status_code}]: {stream_resp.text}")
-        return None
-
-    with TerminalManager():
-        final_text = stream_output(stream_resp, AI_NAME)
-
-    if final_text:
-        mgr.save_assistant_reply(final_text)
-        if COMPRESS_THRESHOLD > 0 and mgr.needs_compression(COMPRESS_THRESHOLD):
-            _do_compress(mgr, silent=False)
-    else:
-        mgr.add_interrupt_hint()
-    return final_text
-
+    print("\n⚠️ 达到最大工具调用轮数，停止执行")
+    return None
 
 def _do_compress(mgr, silent=False):
     if not silent:
@@ -413,7 +452,9 @@ def main():
     other_agents = [a for a in agents if a["id"] != "global"]
 
     print(f"\n🤖 工具作者: clq")
+    perm_desc = {0: "0 (仅聊天)", 1: "1 (只读)", 2: "2 (读写，需确认)", 3: "3 (完全自动)"}
     print(f"📂 工作目录: {WORK_DIR}")
+    print(f"🔒 权限等级: {perm_desc.get(tool_executor.permission, str(tool_executor.permission))}")
     if other_agents:
         ids = ", ".join(f"@{a['id']}" for a in other_agents)
         print(f"🧩 可用智能体: {ids}")
@@ -426,6 +467,7 @@ def main():
     if len(sys.argv) > 1:
         user_input = " ".join(sys.argv[1:])
         print(f"你: {user_input}")
+        tool_executor.next_round()
         chat(user_input)
         mcp_mgr.shutdown()
         return
@@ -504,6 +546,7 @@ def main():
             print("  /compress - 压缩历史记忆（减少 token 占用）")
             print("  /reload   - 重新加载配置和智能体")
             print("  /agents   - 查看所有智能体列表")
+            print("  /diff       - 查看 AI 的文件改动记录")
             print("  /mcp      - 查看已加载的 MCP 工具")
             print("  /list     - 显示本指令列表")
             print()
@@ -511,7 +554,154 @@ def main():
             print("  @名称     - 切换到指定智能体")
             print("  @名称 内容 - 切换并直接对话")
             print('  \"\"\"       - 进入多行输入模式')
+            print("  Ctrl+Q    - 中断 AI 正在生成的回复")
             print()
+            continue
+
+        if user_text.lower().startswith("/diff"):
+            arg = user_text[5:].strip()
+            records = tool_executor.get_diff_records()
+            cur = tool_executor.current_round
+
+            def _group_records(records, cur):
+                groups = []
+                current_round_val = None
+                current_group = []
+                for r in records:
+                    if r["round"] != current_round_val:
+                        if current_group:
+                            groups.append(current_group)
+                        current_group = [r]
+                        current_round_val = r["round"]
+                    else:
+                        current_group.append(r)
+                if current_group:
+                    groups.append(current_group)
+                return groups
+
+            def _build_display_list(groups, cur):
+                display = []
+                for grp in groups:
+                    ago = cur - grp[0]["round"]
+                    when = "\u672c\u8f6e\u5bf9\u8bdd" if ago == 0 else f"\u524d{ago}\u8f6e\u5bf9\u8bdd"
+                    if len(grp) <= 3:
+                        for r in grp:
+                            act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
+                            act = act_map.get(r["action"], r["action"])
+                            display.append({"type": "single", "record": r, "when": when, "act": act})
+                    else:
+                        display.append({"type": "group", "records": grp, "when": when, "count": len(grp), "time": grp[0]["time"]})
+                return display
+
+            def _show_detail(r, cur):
+                ago = cur - r["round"]
+                when = "\u672c\u8f6e\u5bf9\u8bdd" if ago == 0 else f"\u524d{ago}\u8f6e\u5bf9\u8bdd"
+                act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
+                act = act_map.get(r["action"], r["action"])
+                print(f"\n\U0001f4c4 [{r['time']}] \u4e8e{when}\u4e2d{act} {r['path']}")
+                print("\u2500" * 50)
+                detail_record = {"old": r["old"], "new": r["new"], "action": r["action"]}
+                diff_text = tool_executor._format_diff(detail_record)
+                if diff_text:
+                    print(diff_text)
+                else:
+                    print("\uff08\u65e0\u5dee\u5f02\uff09")
+                print("\u2500" * 50)
+                print("  \033[31m- \u5220\u9664/\u65e7\033[0m  \033[32m+ \u65b0\u589e/\u65b0\033[0m")
+                print()
+
+            if not arg:
+                if not records:
+                    print("\n\U0001f4c4 \u6682\u65e0\u6587\u4ef6\u6539\u52a8\u8bb0\u5f55\n")
+                else:
+                    groups = _group_records(records, cur)
+                    groups.reverse()
+                    display = _build_display_list(groups, cur)
+                    print(f"\n\U0001f4c4 \u6587\u4ef6\u6539\u52a8\u8bb0\u5f55\uff08\u5171 {len(records)} \u6761\uff0c{len(display)} \u9879\uff09:")
+                    for i, item in enumerate(display, 1):
+                        if item["type"] == "single":
+                            r = item["record"]
+                            print(f"  {i}. [{r['time']}] \u4e8e{item['when']}\u4e2d{item['act']} {r['path']}")
+                        else:
+                            print(f"  {i}. [{item['time']}] \u4e8e{item['when']}\u4e2d\u6539\u52a8 {item['count']} \u4e2a\u6587\u4ef6")
+                    print(f"\n  /diff N      \u67e5\u770b\u7b2c N \u9879\u8be6\u60c5\uff08\u6298\u53e0\u9879\u4f1a\u5c55\u5f00\uff09")
+                    print(f"  /diff N.M    \u67e5\u770b\u6298\u53e0\u9879\u4e2d\u7b2c M \u6761\u7684\u8be6\u7ec6 diff")
+                    print(f"  /diff \u8def\u5f84   \u67e5\u770b\u6307\u5b9a\u6587\u4ef6\u7684\u6539\u52a8\u5386\u53f2\n")
+            elif "." in arg and arg.replace(".", "").isdigit():
+                parts_dot = arg.split(".", 1)
+                try:
+                    main_idx = int(parts_dot[0])
+                    sub_idx = int(parts_dot[1])
+                except ValueError:
+                    print("\u26a0\ufe0f \u683c\u5f0f\u9519\u8bef\uff0c\u8bf7\u4f7f\u7528 /diff N.M\n")
+                    continue
+                if not records:
+                    print("\n\U0001f4c4 \u6682\u65e0\u6587\u4ef6\u6539\u52a8\u8bb0\u5f55\n")
+                    continue
+                groups = _group_records(records, cur)
+                groups.reverse()
+                display = _build_display_list(groups, cur)
+                if main_idx < 1 or main_idx > len(display):
+                    print(f"\u26a0\ufe0f \u5e8f\u53f7\u8d85\u51fa\u8303\u56f4\uff08\u5f53\u524d\u5171 {len(display)} \u9879\uff09\n")
+                    continue
+                item = display[main_idx - 1]
+                if item["type"] == "single":
+                    print(f"\u26a0\ufe0f \u7b2c {main_idx} \u9879\u4e3a\u5355\u6761\u8bb0\u5f55\uff0c\u8bf7\u76f4\u63a5\u4f7f\u7528 /diff {main_idx}\n")
+                    continue
+                grp_records = item["records"]
+                if sub_idx < 1 or sub_idx > len(grp_records):
+                    print(f"\u26a0\ufe0f \u5b50\u5e8f\u53f7\u8d85\u51fa\u8303\u56f4\uff08\u8be5\u7ec4\u5171 {len(grp_records)} \u6761\uff09\n")
+                    continue
+                _show_detail(grp_records[sub_idx - 1], cur)
+            else:
+                try:
+                    idx = int(arg)
+                    if not records:
+                        print("\n\U0001f4c4 \u6682\u65e0\u6587\u4ef6\u6539\u52a8\u8bb0\u5f55\n")
+                        continue
+                    groups = _group_records(records, cur)
+                    groups.reverse()
+                    display = _build_display_list(groups, cur)
+                    if idx < 1 or idx > len(display):
+                        print(f"\u26a0\ufe0f \u5e8f\u53f7\u8d85\u51fa\u8303\u56f4\uff08\u5f53\u524d\u5171 {len(display)} \u9879\uff09\n")
+                        continue
+                    item = display[idx - 1]
+                    if item["type"] == "single":
+                        _show_detail(item["record"], cur)
+                    else:
+                        grp_records = item["records"]
+                        print(f"\n\U0001f4c4 \u4e8e{item['when']}\u4e2d\u6539\u52a8\u8be6\u60c5\uff08{item['count']} \u4e2a\u6587\u4ef6\uff09:")
+                        for j, r in enumerate(grp_records, 1):
+                            act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
+                            act = act_map.get(r["action"], r["action"])
+                            print(f"  {idx}.{j} [{r['time']}] {act} {r['path']}")
+                        print(f"\n  /diff {idx}.M  \u67e5\u770b\u7b2c M \u6761\u7684\u8be6\u7ec6 diff\n")
+                except ValueError:
+                    parts = arg.rsplit(None, 1)
+                    file_path = parts[0]
+                    sub_idx = None
+                    if len(parts) == 2:
+                        try:
+                            sub_idx = int(parts[1])
+                        except ValueError:
+                            pass
+                    file_records = tool_executor.get_diff_by_path(file_path)
+                    if not file_records:
+                        print(f"\u26a0\ufe0f \u672a\u627e\u5230 {file_path} \u7684\u6539\u52a8\u8bb0\u5f55\n")
+                    elif sub_idx is not None:
+                        if sub_idx < 1 or sub_idx > len(file_records):
+                            print(f"\u26a0\ufe0f \u5e8f\u53f7\u8d85\u51fa\u8303\u56f4\uff08\u8be5\u6587\u4ef6\u5171 {len(file_records)} \u6761\u8bb0\u5f55\uff09\n")
+                        else:
+                            _show_detail(file_records[sub_idx - 1], cur)
+                    else:
+                        print(f"\n\U0001f4c4 {file_path} \u7684\u6539\u52a8\u5386\u53f2\uff08\u5171 {len(file_records)} \u6761\uff09:")
+                        for i, r in enumerate(file_records, 1):
+                            ago = cur - r["round"]
+                            when = "\u672c\u8f6e\u5bf9\u8bdd" if ago == 0 else f"\u524d{ago}\u8f6e\u5bf9\u8bdd"
+                            act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
+                            act = act_map.get(r["action"], r["action"])
+                            print(f"  {i}. [{r['time']}] \u4e8e{when}\u4e2d{act}")
+                        print(f"\n  /diff {file_path} N  \u67e5\u770b\u7b2c N \u6761\u7684\u8be6\u7ec6 diff\n")
             continue
 
         if user_text.lower() == "/mcp":
@@ -533,6 +723,7 @@ def main():
         if user_text.lower() == "/reload":
             _cfg.update(load_config())
             tool_executor.config = _cfg
+            tool_executor.permission = min(3, max(0, _cfg.get("权限", 3)))
             MAX_HISTORY_ROUNDS = _cfg["最大记忆轮数"]
             MAX_TOOL_ROUNDS = _cfg["最大工具调用轮数"]
             COMPRESS_THRESHOLD = _cfg["历史压缩阈值轮数"]
@@ -582,6 +773,7 @@ def main():
                 if not switch_agent(target_id):
                     continue
             if msg:
+                tool_executor.next_round()
                 chat(msg)
                 print()
             continue
@@ -589,6 +781,7 @@ def main():
         if not user_text:
             continue
 
+        tool_executor.next_round()
         chat(user_text)
         print()
 

@@ -80,6 +80,7 @@ def main():
         print(f"❌ 找不到入口文件: {entry}")
         sys.exit(1)
 
+    os.environ["POLYAI_USER_CWD"] = os.getcwd()
     os.chdir(target_dir)
     if target_dir not in sys.path:
         sys.path.insert(0, target_dir)

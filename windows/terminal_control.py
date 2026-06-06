@@ -6,14 +6,12 @@ import msvcrt
 from chat_core import parse_stream_chunk
 
 generating = False
-pause_flag = False
 abort_flag = False
-listener_running = False
 listener_stop = threading.Event()
 
 
 def _key_listener():
-    global generating, listener_running, pause_flag, abort_flag
+    global generating, abort_flag
     while not listener_stop.is_set():
         if not msvcrt.kbhit():
             time.sleep(0.05)
@@ -24,28 +22,10 @@ def _key_listener():
         if not generating:
             continue
 
-        if ch == b' ':
-            pause_flag = not pause_flag
-            if pause_flag:
-                sys.stdout.write("\n⏸️  已暂停，按空格继续...")
-                sys.stdout.flush()
-            else:
-                sys.stdout.write("\n▶️  继续...\n")
-                sys.stdout.flush()
-        elif ch == b'\x00' or ch == b'\xe0':
-            if msvcrt.kbhit():
-                msvcrt.getch()
+        if ch == b'\x11':
             abort_flag = True
-            pause_flag = False
             generating = False
-            sys.stdout.write("\n🛑 打断生成，上下文已保留")
-            sys.stdout.flush()
-            break
-        elif ch == b'\x03':
-            abort_flag = True
-            pause_flag = False
-            generating = False
-            sys.stdout.write("\n🛑 打断生成，上下文已保留")
+            sys.stdout.write("\n\n🛑 已中断生成")
             sys.stdout.flush()
             break
 
@@ -55,20 +35,18 @@ class TerminalManager:
         self._listener = None
 
     def __enter__(self):
-        global generating, pause_flag, abort_flag, listener_running
+        global generating, abort_flag
 
-        pause_flag = False
         abort_flag = False
         generating = True
         listener_stop.clear()
 
         self._listener = threading.Thread(target=_key_listener, daemon=True)
-        listener_running = True
         self._listener.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        global generating, listener_running
+        global generating
 
         generating = False
         listener_stop.set()
@@ -76,7 +54,6 @@ class TerminalManager:
         if self._listener:
             self._listener.join(timeout=0.3)
 
-        listener_running = False
         return False
 
 
@@ -93,8 +70,6 @@ def stream_output(response, ai_name):
         if content is None:
             break
         if content:
-            while pause_flag and not abort_flag:
-                time.sleep(0.05)
             if abort_flag:
                 break
             sys.stdout.write(content)

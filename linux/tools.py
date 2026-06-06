@@ -3,6 +3,9 @@ import re
 import json
 import subprocess
 import fnmatch
+import time
+import difflib
+import unicodedata
 
 TOOLS_DEFINITION = [
     {
@@ -181,6 +184,9 @@ class ToolExecutor:
         self.work_dir = os.path.abspath(work_dir)
         self.auto_confirm = auto_confirm
         self.config = config or {}
+        self.permission = min(3, max(0, self.config.get("权限", 3)))
+        self.diff_records = []
+        self.current_round = 0
 
     def _resolve_path(self, path):
         if os.path.isabs(path):
@@ -188,7 +194,7 @@ class ToolExecutor:
         return os.path.join(self.work_dir, path)
 
     def _confirm(self, action_desc):
-        if self.auto_confirm:
+        if self.permission >= 3 or self.auto_confirm:
             return True
         try:
             answer = input(f"\n⚠️  {action_desc}\n   确认执行？(y/n): ").strip().lower()
@@ -214,6 +220,11 @@ class ToolExecutor:
 
         if not handler:
             return f"[错误] 未知工具: {tool_name}"
+
+        if self.permission == 0:
+            return f"[拒绝] 当前权限等级为 0，不允许使用任何工具"
+        if self.permission == 1 and tool_name not in ("read_file", "list_dir", "search_files", "ask_user"):
+            return f"[拒绝] 当前权限等级为 1（只读），不允许执行 {tool_name}"
 
         return handler(args)
 
@@ -282,10 +293,26 @@ class ToolExecutor:
         if not self._confirm(f"{action}文件: {args['path']} ({line_count} 行)"):
             return "[已取消] 用户拒绝了写入操作"
 
+        old_content = ""
+        if exists and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    old_content = f.read()
+            except Exception:
+                pass
+
         try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            parent_dir = os.path.dirname(path) or "."
+            if parent_dir != "." and not os.path.exists(parent_dir):
+                created_dir = parent_dir
+                os.makedirs(parent_dir, exist_ok=True)
+                rel_dir = os.path.relpath(created_dir, self.work_dir) if not os.path.isabs(args.get("path", "")) else created_dir
+                self._record_diff(rel_dir + "/", "创建目录", "", "")
+            else:
+                os.makedirs(parent_dir, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
+            self._record_diff(args["path"], action, old_content, content)
             return f"[成功] 已{action}文件: {args['path']}"
         except Exception as e:
             return f"[错误] 写入失败: {e}"
@@ -297,8 +324,15 @@ class ToolExecutor:
         if os.path.isfile(path):
             if not self._confirm(f"删除文件: {display_path}"):
                 return "[已取消] 用户拒绝了删除操作"
+            old_content = ""
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    old_content = f.read()
+            except Exception:
+                pass
             try:
                 os.remove(path)
+                self._record_diff(display_path, "删除", old_content, "")
                 return f"[成功] 已删除文件: {display_path}"
             except Exception as e:
                 return f"[错误] 删除失败: {e}"
@@ -314,6 +348,98 @@ class ToolExecutor:
                 return f"[错误] 删除失败: {e}"
         else:
             return f"[错误] 无法识别的路径类型: {path}"
+
+    def next_round(self):
+        self.current_round += 1
+
+    def _record_diff(self, display_path, action, old_content, new_content):
+        max_rounds = self.config.get("diff保存最大轮数", 10)
+        existing = None
+        for r in self.diff_records:
+            if r["round"] == self.current_round and r["path"] == display_path:
+                existing = r
+                break
+        if existing:
+            existing["new"] = new_content
+            existing["time"] = time.strftime("%H:%M:%S")
+            if action == "删除":
+                existing["action"] = "删除" if existing["action"] == "删除" else "修改"
+            elif existing["action"] == "创建":
+                pass
+            else:
+                existing["action"] = action
+        else:
+            record = {
+                "path": display_path,
+                "action": action,
+                "old": old_content,
+                "new": new_content,
+                "time": time.strftime("%H:%M:%S"),
+                "round": self.current_round,
+            }
+            self.diff_records.append(record)
+        if self.current_round > max_rounds:
+            cutoff = self.current_round - max_rounds
+            self.diff_records = [r for r in self.diff_records if r["round"] > cutoff]
+
+    def get_diff_records(self):
+        return [r for r in self.diff_records if r["old"] != r["new"]]
+
+    def get_diff_by_path(self, path):
+        return [r for r in self.diff_records if r["path"] == path or r["path"].endswith("/" + path) or path.endswith("/" + r["path"])]
+
+    def get_diff_detail(self, index):
+        if index < 1 or index > len(self.diff_records):
+            return None
+        record = self.diff_records[index - 1]
+        return {
+            "path": record["path"],
+            "action": record["action"],
+            "time": record["time"],
+            "round": record["round"],
+            "diff": self._format_diff(record),
+        }
+
+    @staticmethod
+    def _display_width(s):
+        w = 0
+        for c in s:
+            if unicodedata.east_asian_width(c) in ("W", "F"):
+                w += 2
+            elif unicodedata.category(c) in ("Mn", "Cf"):
+                pass
+            else:
+                w += 1
+        return w
+
+    def _pad_right(self, s, width):
+        dw = self._display_width(s)
+        return s + " " * max(0, width - dw)
+
+    def _format_diff(self, record):
+        old_lines = record["old"].splitlines()
+        new_lines = record["new"].splitlines()
+        opcodes = difflib.SequenceMatcher(None, old_lines, new_lines).get_opcodes()
+        result = []
+        for tag, i1, i2, j1, j2 in opcodes:
+            if tag == "equal":
+                continue
+            elif tag == "delete":
+                for k in range(i1, i2):
+                    result.append(f"  \033[31m{k+1:4d} - {old_lines[k]}\033[0m")
+            elif tag == "insert":
+                for k in range(j1, j2):
+                    result.append(f"  \033[32m{k+1:4d} + {new_lines[k]}\033[0m")
+            elif tag == "replace":
+                for k in range(i1, i2):
+                    result.append(f"  \033[31m{k+1:4d} - {old_lines[k]}\033[0m")
+                for k in range(j1, j2):
+                    result.append(f"  \033[32m{k+1:4d} + {new_lines[k]}\033[0m")
+        return "\n".join(result)
+
+    def clear_diff_records(self):
+        self.diff_records.clear()
+
 
     def _run_command(self, args):
         command = args["command"]

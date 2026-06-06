@@ -194,6 +194,56 @@ def parse_stream_chunk(line):
         return ""
 
 
+
+def parse_stream_response(response):
+    collected_content = ""
+    tool_calls_map = {}
+    finish_reason = None
+
+    for line in response.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data: "):
+            continue
+        data_str = line[6:]
+        if data_str == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data_str)
+        except Exception:
+            continue
+
+        choice = chunk["choices"][0]
+        delta = choice.get("delta", {})
+        finish_reason = choice.get("finish_reason") or finish_reason
+
+        content = delta.get("content") or delta.get("reasoning_content") or ""
+        if content:
+            collected_content += content
+            yield ("content", content)
+
+        if delta.get("tool_calls"):
+            for tc_delta in delta["tool_calls"]:
+                idx = tc_delta["index"]
+                if idx not in tool_calls_map:
+                    tool_calls_map[idx] = {
+                        "id": tc_delta.get("id", ""),
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""}
+                    }
+                tc = tool_calls_map[idx]
+                if tc_delta.get("id"):
+                    tc["id"] = tc_delta["id"]
+                fn = tc_delta.get("function", {})
+                if fn.get("name"):
+                    tc["function"]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    tc["function"]["arguments"] += fn["arguments"]
+
+    if tool_calls_map:
+        tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())]
+        yield ("tool_calls", tool_calls, collected_content, finish_reason)
+    else:
+        yield ("done", collected_content, finish_reason)
+
 def _normalize_base_url(base_url):
     url = base_url.rstrip("/")
     if not url.endswith("/chat/completions"):

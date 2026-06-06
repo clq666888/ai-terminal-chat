@@ -8,14 +8,12 @@ import select
 from chat_core import parse_stream_chunk
 
 generating = False
-pause_flag = False
 abort_flag = False
-listener_running = False
 listener_stop = threading.Event()
 
 
 def _key_listener():
-    global generating, listener_running, pause_flag, abort_flag
+    global generating, abort_flag
     while not listener_stop.is_set():
         r, _, _ = select.select([sys.stdin], [], [], 0.1)
         if not r:
@@ -28,19 +26,10 @@ def _key_listener():
         if not generating:
             continue
 
-        if ch == ' ':
-            pause_flag = not pause_flag
-            if pause_flag:
-                sys.stdout.write("\n⏸️  已暂停，按空格继续...")
-                sys.stdout.flush()
-            else:
-                sys.stdout.write("\n▶️  继续...\n")
-                sys.stdout.flush()
-        elif ch == '\x00':
+        if ch == '\x11':
             abort_flag = True
-            pause_flag = False
             generating = False
-            sys.stdout.write("\n🛑 打断生成，上下文已保留")
+            sys.stdout.write("\n\n🛑 已中断生成")
             sys.stdout.flush()
             break
 
@@ -51,24 +40,25 @@ class TerminalManager:
         self._listener = None
 
     def __enter__(self):
-        global generating, pause_flag, abort_flag, listener_running
+        global generating, abort_flag
 
         fd = sys.stdin.fileno()
         self._old_termios = termios.tcgetattr(fd)
         tty.setcbreak(fd)
+        new_attr = termios.tcgetattr(fd)
+        new_attr[0] &= ~(termios.IXON | termios.IXOFF)
+        termios.tcsetattr(fd, termios.TCSANOW, new_attr)
 
-        pause_flag = False
         abort_flag = False
         generating = True
         listener_stop.clear()
 
         self._listener = threading.Thread(target=_key_listener, daemon=True)
-        listener_running = True
         self._listener.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        global generating, listener_running
+        global generating
 
         generating = False
         listener_stop.set()
@@ -80,7 +70,6 @@ class TerminalManager:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_termios)
             termios.tcflush(sys.stdin, termios.TCIOFLUSH)
 
-        listener_running = False
         return False
 
 
@@ -97,8 +86,6 @@ def stream_output(response, ai_name):
         if content is None:
             break
         if content:
-            while pause_flag and not abort_flag:
-                time.sleep(0.05)
             if abort_flag:
                 break
             sys.stdout.write(content)
