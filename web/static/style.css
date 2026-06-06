@@ -51,7 +51,7 @@ body {
     cursor: col-resize;
     background: transparent;
     position: relative;
-    z-index: 21;
+    z-index: 19;
     transition: background 0.15s ease;
 }
 
@@ -116,19 +116,48 @@ body.resizing .sidebar {
     border-color: var(--accent);
 }
 
+.conv-list-wrap {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.conv-list-wrap::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 24px;
+    pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--bg-sidebar));
+}
+
 .conv-list {
     flex: 1;
     overflow-y: auto;
     padding: 8px;
+    padding-bottom: 18px;
 }
 
 .conv-list::-webkit-scrollbar {
-    width: 4px;
+    width: 6px;
+}
+
+.conv-list::-webkit-scrollbar-track {
+    background: transparent;
 }
 
 .conv-list::-webkit-scrollbar-thumb {
     background: var(--border);
-    border-radius: 2px;
+    border-radius: 3px;
+    background-clip: padding-box;
+}
+
+.conv-list::-webkit-scrollbar-thumb:hover {
+    background: var(--text-dim);
 }
 
 .conv-item {
@@ -309,6 +338,11 @@ body.resizing .sidebar {
     flex-shrink: 0;
 }
 
+.sidebar-import {
+    padding: 0 12px 8px;
+    flex-shrink: 0;
+}
+
 .btn-settings {
     width: 100%;
     display: flex;
@@ -402,7 +436,6 @@ body.resizing .sidebar {
     overflow-y: auto;
     padding: 32px 16px;
     background: var(--bg-chat);
-    scroll-behavior: smooth;
 }
 
 .chat-area::-webkit-scrollbar {
@@ -449,6 +482,7 @@ body.resizing .sidebar {
 
 .message {
     display: flex;
+    flex-wrap: wrap;
     gap: 12px;
     margin-bottom: 28px;
     max-width: 960px;
@@ -1636,6 +1670,10 @@ body.resizing .sidebar {
     opacity: 1;
 }
 
+.message .btn-retry svg {
+    display: block;
+}
+
 .message.user .btn-undo {
     display: none;
     align-items: center;
@@ -1671,6 +1709,135 @@ body.resizing .sidebar {
 
 .error-msg {
     display: inline;
+}
+
+/* ==================== 消息操作栏（复制/重新生成） ==================== */
+.message .msg-actions {
+    display: flex;
+    align-items: center;
+    flex-basis: 100%;
+    gap: 4px;
+    margin-top: 2px;
+    margin-left: 44px;
+    opacity: 0.75;
+    transition: opacity 0.2s;
+}
+
+.message.user .msg-actions {
+    justify-content: flex-end;
+    margin-left: 0;
+    margin-right: 44px;
+}
+
+.message:hover .msg-actions {
+    opacity: 1;
+}
+
+.msg-action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.18s;
+    flex-shrink: 0;
+}
+
+.msg-action-btn:hover {
+    background: rgba(124, 138, 246, 0.12);
+    border-color: rgba(124, 138, 246, 0.3);
+    color: var(--accent);
+}
+
+.msg-action-btn.copied {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.3);
+    background: rgba(52, 211, 153, 0.1);
+}
+
+.msg-action-btn svg {
+    display: block;
+}
+
+/* ==================== 代码块顶部栏 ==================== */
+.bubble pre.code-block-wrap {
+    position: relative;
+    padding: 0;
+    overflow: hidden;
+}
+
+.bubble pre.code-block-wrap > code {
+    display: block;
+    padding: 12px 14px;
+    overflow-x: auto;
+}
+
+.code-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px 6px 14px;
+    background: rgba(0, 0, 0, 0.35);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    user-select: none;
+}
+
+.code-lang {
+    color: var(--text-dim);
+    font-family: var(--font-mono, monospace);
+    text-transform: lowercase;
+    letter-spacing: 0.3px;
+}
+
+.code-tools {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.code-copy-btn,
+.code-download-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.18s;
+}
+
+.code-copy-btn:hover,
+.code-download-btn:hover {
+    color: var(--accent);
+    background: rgba(124, 138, 246, 0.12);
+    border-color: rgba(124, 138, 246, 0.3);
+}
+
+.code-copy-btn.copied {
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.35);
+    background: rgba(52, 211, 153, 0.1);
+}
+
+.code-copy-btn svg,
+.code-download-btn svg {
+    display: block;
+    width: 14px;
+    height: 14px;
+}
+
+.code-btn-text {
+    line-height: 1;
 }
 
 .callable-toggle-row {
@@ -2547,4 +2714,62 @@ body.resizing .sidebar {
     .ask-body { padding: 12px; }
     .ask-opt { padding: 8px 14px; font-size: 14px; }
     .ask-btn { padding: 9px 18px; }
+}
+
+/* ==================== 数据管理按钮 ==================== */
+.data-manage-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 4px;
+}
+.btn-data-action {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--bg-elevated, #1e293b);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: inherit;
+    text-align: center;
+}
+.btn-data-action:hover {
+    border-color: var(--accent);
+    background: rgba(99, 102, 241, 0.12);
+}
+.btn-data-action:active {
+    transform: scale(0.98);
+}
+
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.setting-row .setting-label {
+    margin: 0;
+}
+.setting-sub {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border);
+}
+
+.compress-notice {
+    align-self: center;
+    max-width: 88%;
+    margin: 10px auto;
+    padding: 10px 14px;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 10px;
+    color: #b45309;
+    font-size: 13px;
+    line-height: 1.6;
+    text-align: center;
 }

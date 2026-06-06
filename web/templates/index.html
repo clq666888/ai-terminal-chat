@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Chat</title>
+    <link rel="stylesheet" href="/static/highlight-theme.min.css?v={{ cache_version }}">
     <link rel="stylesheet" href="/static/style.css?v={{ cache_version }}">
 </head>
 <body>
@@ -24,7 +25,20 @@
             </svg>
             <input type="text" id="conv-search-input" placeholder="搜索对话" autocomplete="off">
         </div>
-        <div class="conv-list" id="conv-list"></div>
+        <div class="conv-list-wrap">
+            <div class="conv-list" id="conv-list"></div>
+        </div>
+        <div class="sidebar-import">
+            <button class="btn-settings" id="btn-import-convs">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                导入对话
+            </button>
+            <input type="file" id="import-file-input" accept="application/json,.json" style="display:none;">
+        </div>
         <div class="sidebar-footer">
             <button class="btn-settings" id="btn-settings">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
@@ -146,6 +160,21 @@
                     <label class="setting-label">上下文大小限制</label>
                     <div class="setting-hint">单位 K，0 = 不限制，建议 512-4096</div>
                     <input type="number" id="set-max-context-size" class="setting-input" min="0" max="65536" step="64" placeholder="2048">
+                </div>
+                <div class="setting-group">
+                    <div class="setting-row">
+                        <label class="setting-label" for="set-auto-compress">自动压缩</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="set-auto-compress">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-hint">关闭：则直接丢弃最早对话（在上下文轮数配置）；开启：智能压缩超出阈值的对话</div>
+                    <div class="setting-sub" id="compress-threshold-row" style="display:none;">
+                        <label class="setting-label">超出多少开始压缩</label>
+                        <div class="setting-hint">单位 K，历史超过此大小后自动压缩</div>
+                        <input type="number" id="set-compress-threshold" class="setting-input" min="1" max="65536" step="1" placeholder="8">
+                    </div>
                 </div>
             </div>
             <div class="settings-footer">
@@ -301,6 +330,7 @@
             </div>
         </div>
     </div>
+    <script src="/static/highlight.min.js?v={{ cache_version }}"></script>
     <script src="/static/marked.min.js?v={{ cache_version }}"></script>
     <script src="/static/app.js?v={{ cache_version }}"></script>
 </body>

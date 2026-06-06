@@ -15,6 +15,9 @@ const btnSaveSettings = document.getElementById("btn-save-settings");
 
 const setMaxRounds = document.getElementById("set-max-rounds");
 const setMaxContextSize = document.getElementById("set-max-context-size");
+const setAutoCompress = document.getElementById("set-auto-compress");
+const setCompressThreshold = document.getElementById("set-compress-threshold");
+const compressThresholdRow = document.getElementById("compress-threshold-row");
 const setBaseUrl = document.getElementById("set-base-url");
 const setApiKey = document.getElementById("set-api-key");
 const keyStatus = document.getElementById("key-status");
@@ -124,16 +127,13 @@ userInput.addEventListener("keydown", e => {
 
 btnSettings.addEventListener("click", openSettings);
 btnCloseSettings.addEventListener("click", closeSettings);
-settingsOverlay.addEventListener("click", e => { if (e.target === settingsOverlay) closeSettings(); });
 btnSaveSettings.addEventListener("click", saveSettings);
 
 quickModel.addEventListener("change", onQuickModelChange);
 btnManageModels.addEventListener("click", openManageModels);
 btnCloseManage.addEventListener("click", closeManageModels);
-modelManageOverlay.addEventListener("click", e => { if (e.target === modelManageOverlay) closeManageModels(); });
 btnOpenModelManager.addEventListener("click", openModelList);
 btnCloseModelList.addEventListener("click", closeModelList);
-modelListOverlay.addEventListener("click", e => { if (e.target === modelListOverlay) closeModelList(); });
 addProvider.addEventListener("change", onAddProviderChange);
 addModel.addEventListener("change", () => {
     if (addModel.value === "__custom__") { addModelCustom.style.display = "block"; addModelCustom.focus(); }
@@ -149,7 +149,6 @@ document.addEventListener("click", e => {
 });
 
 btnCloseAgentPanel.addEventListener("click", closeAgentPanel);
-agentOverlay.addEventListener("click", e => { if (e.target === agentOverlay) closeAgentPanel(); });
 btnCreateAgent.addEventListener("click", () => showAgentForm(null));
 btnAgentCancel.addEventListener("click", showAgentList);
 btnAgentSave.addEventListener("click", saveAgent);
@@ -951,6 +950,7 @@ function buildConvItem(c) {
         '<button class="conv-item-more" title="更多">' + CONV_MENU_SVG + '</button>' +
         '<div class="conv-menu">' +
         '<button class="conv-menu-item" data-act="rename">重命名</button>' +
+        '<button class="conv-menu-item" data-act="share">分享</button>' +
         '<button class="conv-menu-item" data-act="pin">' + (c.pinned ? "取消置顶" : "置顶") + '</button>' +
         '<button class="conv-menu-item danger" data-act="delete">删除</button>' +
         '</div>';
@@ -990,6 +990,7 @@ function buildConvItem(c) {
             closeConvMenus();
             const act = btn.dataset.act;
             if (act === "rename") await renameConversation(c);
+            else if (act === "share") await shareConversation(c);
             else if (act === "pin") await togglePinConversation(c);
             else if (act === "delete") await deleteConversation(c.id);
         });
@@ -1068,8 +1069,10 @@ async function createNewConversation() {
 }
 
 async function switchConversation(cid) {
+    if (cid === currentConvId && !isGenerating) return;
     if (isGenerating) stopGeneration();
     currentConvId = cid;
+    isBatchRendering = true;
     document.querySelectorAll(".conv-item").forEach(el => {
         el.classList.toggle("active", el.dataset.id === cid);
     });
@@ -1111,13 +1114,20 @@ async function switchConversation(cid) {
                 }
             }
             const renderedBubble = addMessage(role, text, imgs, historyDocs, thisUserIndex);
-            if (role === "ai") lastAiBubble = renderedBubble;
+            if (role === "ai") {
+                lastAiBubble = renderedBubble;
+                const aiMsgDiv = renderedBubble.closest(".message");
+                attachAiActions(aiMsgDiv, text, { allowRegen: false });
+            }
         });
         const allMsgs = chatArea.querySelectorAll(".message.ai");
         if (allMsgs.length > 0) {
-            appendRetryButton(allMsgs[allMsgs.length - 1], "", false);
+            const lastAiMsg = allMsgs[allMsgs.length - 1];
+            attachAiActions(lastAiMsg, lastAiMsg.dataset.rawText || "", { allowRegen: true });
         }
     }
+    isBatchRendering = false;
+    chatArea.scrollTop = chatArea.scrollHeight;
 
     const convResp = await fetch("/api/conversations");
     const list = await convResp.json();
@@ -1146,6 +1156,7 @@ function hideWelcome() { const w = chatArea.querySelector(".welcome"); if (w) w.
 
 // ==================== 消息渲染与发送 ====================
 let userScrolledUp = false;
+let isBatchRendering = false;
 
 chatArea.addEventListener("scroll", () => {
     const gap = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight;
@@ -1223,7 +1234,7 @@ function addMessage(role, content, images, docs, userIndex) {
         appendUndoButton(div, content, images, docs, uIdx);
     }
     chatArea.appendChild(div);
-    chatArea.scrollTop = chatArea.scrollHeight;
+    if (!isBatchRendering) chatArea.scrollTop = chatArea.scrollHeight;
     return bubble;
 }
 
@@ -1314,7 +1325,7 @@ function appendRetryButton(msgDiv, userText, rolledBack) {
     const btn = document.createElement("button");
     btn.className = "btn-retry" + (rolledBack ? " error-retry" : "");
     btn.title = "重试";
-    btn.innerHTML = "&#x21bb;";
+    btn.innerHTML = REGEN_ICON_SVG;
     btn.addEventListener("click", () => retryLastMessage(userText, rolledBack));
     msgDiv.appendChild(btn);
 }
@@ -1775,10 +1786,18 @@ async function sendMessage(presetText, opts) {
     let renderPending = false;
     let streamEnded = false;
     let rafId = 0;
+    let lastRenderTs = 0;
+    const MIN_RENDER_INTERVAL = 60;
     function scheduleRender() {
         if (renderPending || streamEnded) return;
         renderPending = true;
         rafId = requestAnimationFrame(() => {
+            const now = performance.now();
+            if (now - lastRenderTs < MIN_RENDER_INTERVAL && !streamEnded) {
+                rafId = requestAnimationFrame(() => { renderPending = false; rafId = 0; scheduleRender(); });
+                return;
+            }
+            lastRenderTs = now;
             renderPending = false;
             rafId = 0;
             if (streamEnded) return;
@@ -1912,6 +1931,9 @@ async function sendMessage(presetText, opts) {
                     if (parsed.ask) {
                         askPayload = parsed.ask;
                     }
+                    if (parsed.compress) {
+                        showCompressNotice(parsed.compress.threshold_kb);
+                    }
                 } catch {
                     fullText += data;
                     scheduleRender();
@@ -1985,7 +2007,8 @@ async function sendMessage(presetText, opts) {
         if (askPayload && askPayload.questions && askPayload.questions.length) {
             renderAskCard(bubble, askPayload.questions);
         } else {
-            appendRetryButton(bubble.closest(".message"), text, false);
+            const aiMsgDiv = bubble.closest(".message");
+            attachAiActions(aiMsgDiv, fullText, { allowRegen: true });
         }
     }
     await loadConversations();
@@ -1997,17 +2020,30 @@ async function openSettings() {
     const cfg = resp.ok ? await resp.json() : {};
     setMaxRounds.value = cfg.max_history_rounds || 50;
     setMaxContextSize.value = cfg.max_context_size_kb || 0;
+    setAutoCompress.checked = !!cfg.auto_compress;
+    setCompressThreshold.value = cfg.compress_threshold_kb || 8;
+    updateCompressRow();
     settingsOverlay.classList.add("active");
 }
 
 function closeSettings() { settingsOverlay.classList.remove("active"); }
+
+function updateCompressRow() {
+    if (!compressThresholdRow) return;
+    compressThresholdRow.style.display = setAutoCompress.checked ? "" : "none";
+}
+if (setAutoCompress) {
+    setAutoCompress.addEventListener("change", updateCompressRow);
+}
 
 
 
 async function saveSettings() {
     const payload = {
         max_history_rounds: parseInt(setMaxRounds.value) || 50,
-        max_context_size_kb: parseInt(setMaxContextSize.value) || 0
+        max_context_size_kb: parseInt(setMaxContextSize.value) || 0,
+        auto_compress: !!setAutoCompress.checked,
+        compress_threshold_kb: parseInt(setCompressThreshold.value) || 8
     };
     try {
         const resp = await fetch("/api/settings", {
@@ -2114,10 +2150,218 @@ function showToast(msg, type) {
     setTimeout(() => { if (toast.parentNode) toast.remove(); }, duration);
 }
 
+function showCompressNotice(thresholdKb) {
+    if (chatArea.lastElementChild && chatArea.lastElementChild.classList.contains("compress-notice")) return;
+    const notice = document.createElement("div");
+    notice.className = "compress-notice";
+    const kb = thresholdKb ? ("（已超过 " + thresholdKb + "K）") : "";
+    notice.textContent = "历史对话已超出上限" + kb + "，较早内容已自动压缩为「前情提要」保留。为获得更好效果，建议新建对话继续。";
+    chatArea.appendChild(notice);
+    if (shouldAutoScroll()) chatArea.scrollTop = chatArea.scrollHeight;
+}
+
 function escapeHtml(text) {
     const div = document.createElement("div");
     div.textContent = text;
     return div.innerHTML;
+}
+
+const COPY_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+const CHECK_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+const REGEN_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>';
+const DOWNLOAD_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+
+async function copyToClipboard(text) {
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch (e) {}
+    try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        return ok;
+    } catch (e) {
+        return false;
+    }
+}
+
+function flashCopyButton(btn) {
+    const original = btn.innerHTML;
+    btn.classList.add("copied");
+    btn.innerHTML = CHECK_ICON_SVG + (btn.dataset.label ? '<span>已复制</span>' : '');
+    setTimeout(() => {
+        btn.classList.remove("copied");
+        btn.innerHTML = original;
+    }, 1500);
+}
+
+const CODE_EXT_MAP = {
+    javascript: "js", typescript: "ts", python: "py", bash: "sh", shell: "sh",
+    json: "json", html: "html", xml: "xml", css: "css", java: "java",
+    cpp: "cpp", c: "c", csharp: "cs", go: "go", rust: "rs", ruby: "rb",
+    php: "php", sql: "sql", yaml: "yml", markdown: "md", plaintext: "txt"
+};
+
+function detectCodeLang(codeEl) {
+    if (!codeEl) return "";
+    const cls = codeEl.className || "";
+    const m = cls.match(/language-([\w-]+)/);
+    if (m) return m[1].toLowerCase();
+    return "";
+}
+
+function enhanceCodeBlocks(bubble) {
+    const pres = bubble.querySelectorAll("pre");
+    pres.forEach(pre => {
+        if (pre.classList.contains("code-block-wrap")) return;
+        pre.classList.add("code-block-wrap");
+        const codeEl = pre.querySelector("code");
+
+        // 语法高亮
+        let lang = detectCodeLang(codeEl);
+        if (codeEl && window.hljs) {
+            try {
+                if (lang && hljs.getLanguage(lang)) {
+                    const res = hljs.highlight(codeEl.textContent, { language: lang });
+                    codeEl.innerHTML = res.value;
+                    codeEl.classList.add("hljs");
+                } else {
+                    const res = hljs.highlightAuto(codeEl.textContent);
+                    codeEl.innerHTML = res.value;
+                    codeEl.classList.add("hljs");
+                    if (!lang && res.language) lang = res.language;
+                }
+            } catch (err) { /* 高亮失败则保持原样 */ }
+        }
+
+        // 顶部栏
+        const header = document.createElement("div");
+        header.className = "code-header";
+        const langLabel = document.createElement("span");
+        langLabel.className = "code-lang";
+        langLabel.textContent = lang || "code";
+        const tools = document.createElement("div");
+        tools.className = "code-tools";
+
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "code-copy-btn";
+        copyBtn.type = "button";
+        copyBtn.title = "复制代码";
+        copyBtn.innerHTML = COPY_ICON_SVG + '<span class="code-btn-text">复制</span>';
+        copyBtn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            const ce = pre.querySelector("code");
+            const codeText = ce ? ce.innerText : pre.innerText;
+            const ok = await copyToClipboard(codeText);
+            if (ok) {
+                copyBtn.classList.add("copied");
+                copyBtn.innerHTML = CHECK_ICON_SVG + '<span class="code-btn-text">已复制</span>';
+                setTimeout(() => {
+                    copyBtn.classList.remove("copied");
+                    copyBtn.innerHTML = COPY_ICON_SVG + '<span class="code-btn-text">复制</span>';
+                }, 1500);
+            } else {
+                showToast("复制失败", "error");
+            }
+        });
+
+        const dlBtn = document.createElement("button");
+        dlBtn.className = "code-download-btn";
+        dlBtn.type = "button";
+        dlBtn.title = "下载代码";
+        dlBtn.innerHTML = DOWNLOAD_ICON_SVG + '<span class="code-btn-text">下载</span>';
+        dlBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const ce = pre.querySelector("code");
+            const codeText = ce ? ce.innerText : pre.innerText;
+            const ext = CODE_EXT_MAP[lang] || "txt";
+            const blob = new Blob([codeText], { type: "text/plain;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "code-" + Date.now() + "." + ext;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
+
+        tools.appendChild(copyBtn);
+        tools.appendChild(dlBtn);
+        header.appendChild(langLabel);
+        header.appendChild(tools);
+        pre.insertBefore(header, pre.firstChild);
+    });
+}
+
+function attachAiActions(msgDiv, rawText, opts) {
+    if (!msgDiv) return;
+    opts = opts || {};
+    const bubble = msgDiv.querySelector(".bubble");
+    if (bubble) enhanceCodeBlocks(bubble);
+
+    let actions = msgDiv.querySelector(".msg-actions");
+    if (actions) actions.remove();
+    actions = document.createElement("div");
+    actions.className = "msg-actions";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "msg-action-btn";
+    copyBtn.type = "button";
+    copyBtn.title = "复制全文";
+    copyBtn.innerHTML = COPY_ICON_SVG;
+    copyBtn.addEventListener("click", async () => {
+        const text = msgDiv.dataset.rawText || (bubble ? bubble.innerText : "");
+        const ok = await copyToClipboard(text);
+        if (ok) flashCopyButton(copyBtn);
+        else showToast("复制失败", "error");
+    });
+    actions.appendChild(copyBtn);
+
+    if (opts.allowRegen) {
+        const regenBtn = document.createElement("button");
+        regenBtn.className = "msg-action-btn";
+        regenBtn.type = "button";
+        regenBtn.title = "重新生成";
+        regenBtn.innerHTML = REGEN_ICON_SVG;
+        regenBtn.addEventListener("click", () => regenerateLastMessage());
+        actions.appendChild(regenBtn);
+    }
+
+    if (typeof rawText === "string") {
+        msgDiv.dataset.rawText = rawText;
+    }
+    msgDiv.appendChild(actions);
+}
+
+async function regenerateLastMessage() {
+    if (isGenerating || !currentConvId) return;
+    const resp = await fetch("/api/conversations/" + currentConvId + "/retry", { method: "POST" });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const messages = chatArea.querySelectorAll(".message");
+    if (messages.length >= 2) {
+        messages[messages.length - 1].remove();
+        messages[messages.length - 2].remove();
+    } else if (messages.length >= 1) {
+        messages[messages.length - 1].remove();
+    }
+    if (convUserCount > 0) convUserCount--;
+    const userText = data.user_message || "";
+    const images = (data.images || []).map((url, i) => ({ name: "image_" + i, base64: url }));
+    let plainText = userText;
+    const savedPendingImages = pendingImages;
+    pendingImages = images;
+    await sendMessage(plainText || " ");
+    pendingImages = savedPendingImages.length ? savedPendingImages : pendingImages;
 }
 
 function renderCallBlocks(text) {
@@ -2223,3 +2467,107 @@ loadAgentBar();
     });
 })();
 
+// ==================== 数据管理：导入对话 + 单对话分享导出 ====================
+function _slugifyFilename(name) {
+    let s = (name || "对话").replace(/[\\/:*?"<>|\n\r\t]/g, "_").trim();
+    if (!s) s = "对话";
+    if (s.length > 60) s = s.slice(0, 60);
+    return s;
+}
+
+async function shareConversation(c) {
+    if (!c || !c.id) return;
+    let payloadText;
+    try {
+        const resp = await fetch("/api/conversations/export?id=" + encodeURIComponent(c.id));
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            showToast(d.error || "导出失败", "error");
+            return;
+        }
+        payloadText = await resp.text();
+    } catch (e) {
+        showToast("导出失败", "error");
+        return;
+    }
+    const defaultName = _slugifyFilename(c.title) + ".json";
+
+    // 优先用 showSaveFilePicker（Chrome/Edge）：弹系统目录窗口，可选任意位置+文件名
+    if (window.showSaveFilePicker) {
+        try {
+            const handle = await window.showSaveFilePicker({
+                suggestedName: defaultName,
+                types: [{ description: "JSON 文件", accept: { "application/json": [".json"] } }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(payloadText);
+            await writable.close();
+            showToast("已保存：" + (handle.name || defaultName), "success");
+            return;
+        } catch (e) {
+            if (e && e.name === "AbortError") return; // 用户取消，不提示
+            // 其它异常则退回普通下载
+        }
+    }
+
+    // 兜底：浏览器默认下载（Firefox/Safari）
+    const blob = new Blob([payloadText], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = defaultName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast("已导出到下载目录", "success");
+}
+
+(function setupDataManage() {
+    const btnImport = document.getElementById("btn-import-convs");
+    const fileInput = document.getElementById("import-file-input");
+    if (!btnImport || !fileInput) return;
+
+    btnImport.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", async () => {
+        const file = fileInput.files && fileInput.files[0];
+        fileInput.value = "";
+        if (!file) return;
+        let parsed;
+        try {
+            const text = await file.text();
+            parsed = JSON.parse(text);
+        } catch (e) {
+            showToast("文件不是有效的 JSON", "error");
+            return;
+        }
+        const ok = await confirmDialog(
+            "将把文件中的对话导入到当前列表（合并方式，不会覆盖已有对话）。继续？",
+            { title: "导入对话", okText: "导入", icon: "\uD83D\uDCE5" }
+        );
+        if (!ok) return;
+        const body = (parsed && Array.isArray(parsed.conversations))
+            ? { conversations: parsed.conversations, mode: "merge" }
+            : (Array.isArray(parsed) ? { conversations: parsed, mode: "merge" } : null);
+        if (!body) {
+            showToast("文件格式不正确，找不到对话数据", "error");
+            return;
+        }
+        try {
+            const resp = await fetch("/api/conversations/import", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+            const data = await resp.json();
+            if (resp.ok) {
+                showToast("已导入 " + data.imported + " 个对话" + (data.skipped ? "，跳过 " + data.skipped + " 个" : ""), "success");
+                await loadConversations();
+            } else {
+                showToast(data.error || "导入失败", "error");
+            }
+        } catch (e) {
+            showToast("导入失败", "error");
+        }
+    });
+})();

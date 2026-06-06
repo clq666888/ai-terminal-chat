@@ -97,6 +97,8 @@ def _default_config():
         "provider": "deepseek",
         "max_history_rounds": MAX_HISTORY_ROUNDS,
         "max_context_size_kb": 0,
+        "auto_compress": False,
+        "compress_threshold_kb": 8,
         "web_search_count": 5,
         "custom_models": []
     }
@@ -274,6 +276,114 @@ def _build_callable_prompt(callable_agents):
 
 
 ASK_ANSWER_PREFIX = "[[ASK_ANSWER]]"
+HISTORY_SUMMARY_PREFIX = "[[HISTORY_SUMMARY]]"
+
+
+def _history_bytes(history):
+    try:
+        return len(json.dumps(history, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _msg_plain_text(m):
+    c = m.get("content")
+    if isinstance(c, str):
+        if c.startswith(ASK_ANSWER_PREFIX):
+            c = c[len(ASK_ANSWER_PREFIX):]
+        if c.startswith(HISTORY_SUMMARY_PREFIX):
+            c = c[len(HISTORY_SUMMARY_PREFIX):]
+        return c
+    if isinstance(c, list):
+        parts = []
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(b.get("text", ""))
+            elif isinstance(b, dict) and b.get("type") == "image_url":
+                parts.append("[图片]")
+        return "\n".join(parts)
+    return ""
+
+
+def _compress_history(history, llm_call, threshold_bytes, keep_recent_msgs=6):
+    """超阈值时把最老的若干条普通消息压成一条摘要 system 消息。
+    返回 True 表示发生了压缩。完整原文不在此处删除（仅影响传入的 history 列表副本逻辑由调用方决定）。"""
+    if threshold_bytes <= 0:
+        return False
+    if _history_bytes(history) <= threshold_bytes:
+        return False
+
+    sys_count = 1 if (history and history[0].get("role") == "system") else 0
+    summary_idx = next(
+        (i for i, m in enumerate(history)
+         if m.get("role") == "system" and isinstance(m.get("content"), str)
+         and m["content"].startswith(HISTORY_SUMMARY_PREFIX)),
+        -1
+    )
+
+    head = sys_count
+    if summary_idx == head:
+        head += 1
+
+    total = len(history)
+    end = total - keep_recent_msgs
+    if end <= head:
+        return False
+
+    to_compress = history[head:end]
+    if not to_compress:
+        return False
+
+    prev_summary = ""
+    if summary_idx >= 0:
+        prev_summary = _msg_plain_text(history[summary_idx])
+
+    lines = []
+    for m in to_compress:
+        role = m.get("role")
+        if role == "user":
+            who = "用户"
+        elif role == "assistant":
+            who = "助手"
+        else:
+            who = "系统"
+        txt = _msg_plain_text(m).strip()
+        if txt:
+            lines.append(f"{who}：{txt}")
+    convo_text = "\n".join(lines)
+    if not convo_text.strip():
+        return False
+
+    prompt = (
+        "请把下面这段较早的对话历史压缩成一份简洁的中文「前情提要」，"
+        "保留关键事实、用户偏好、已达成的结论、未完成的任务和重要约定，"
+        "去掉寒暄和冗余，用要点列出，不要编造未出现的信息。\n\n"
+    )
+    if prev_summary.strip():
+        prompt += "已有的前情提要（请与下面新内容融合为一份）：\n" + prev_summary.strip() + "\n\n"
+    prompt += "需要压缩的对话：\n" + convo_text
+
+    try:
+        summary = llm_call([{"role": "user", "content": prompt}])
+    except Exception:
+        summary = ""
+    if not summary or not summary.strip():
+        return False
+
+    summary_msg = {
+        "role": "system",
+        "content": HISTORY_SUMMARY_PREFIX + "【前情提要（自动压缩）】\n" + summary.strip()
+    }
+
+    new_history = []
+    new_history.extend(history[:sys_count])
+    new_history.append(summary_msg)
+    new_history.extend(history[end:])
+    history.clear()
+    history.extend(new_history)
+    return True
+
+
 
 
 ASK_PROMPT = (
@@ -428,6 +538,8 @@ def get_settings():
         "has_api_key": bool(_get_key_for(runtime_config["provider"])),
         "max_history_rounds": runtime_config["max_history_rounds"],
         "max_context_size_kb": runtime_config.get("max_context_size_kb", 0),
+        "auto_compress": runtime_config.get("auto_compress", False),
+        "compress_threshold_kb": runtime_config.get("compress_threshold_kb", 8),
         "web_search_count": runtime_config.get("web_search_count", 5)
     })
 
@@ -449,6 +561,14 @@ def update_settings():
     if "max_context_size_kb" in data:
         try:
             runtime_config["max_context_size_kb"] = int(data["max_context_size_kb"])
+        except (ValueError, TypeError):
+            pass
+    if "auto_compress" in data:
+        runtime_config["auto_compress"] = bool(data["auto_compress"])
+    if "compress_threshold_kb" in data:
+        try:
+            v = int(data["compress_threshold_kb"])
+            runtime_config["compress_threshold_kb"] = max(1, v)
         except (ValueError, TypeError):
             pass
     if "web_search_count" in data:
@@ -874,7 +994,7 @@ def chat():
         mgr.add_user_message(user_input)
 
     max_size_kb = runtime_config.get("max_context_size_kb", 0)
-    if max_size_kb > 0:
+    if max_size_kb > 0 and not runtime_config.get("auto_compress", False):
         max_bytes = int(max_size_kb * 1024)
         while len(json.dumps(history, ensure_ascii=False).encode("utf-8")) > max_bytes:
             non_sys = [i for i, m in enumerate(history) if m["role"] != "system"]
@@ -1080,6 +1200,18 @@ def chat():
             else:
                 mgr._trim_history()
 
+            if runtime_config.get("auto_compress", False):
+                thr_kb = runtime_config.get("compress_threshold_kb", 8)
+                thr_bytes = int(thr_kb) * 1024 if thr_kb else 0
+                if thr_bytes > 0 and _history_bytes(history) > thr_bytes:
+                    try:
+                        did = _compress_history(history, _llm_call, thr_bytes)
+                    except Exception:
+                        did = False
+                    if did:
+                        cmp_data = json.dumps({"compress": {"threshold_kb": int(thr_kb)}}, ensure_ascii=False)
+                        yield f"data: {cmp_data}\n\n"
+
             ask_questions, ask_prefix = _parse_ask_block(stream_state["full_reply"])
             if ask_questions:
                 ask_data = json.dumps({"ask": {"questions": ask_questions, "prefix": ask_prefix}}, ensure_ascii=False)
@@ -1229,6 +1361,78 @@ def undo_conversation(cid):
         "user_message": removed_user_content,
         "images": removed_images
     })
+@app.route("/api/conversations/export", methods=["GET"])
+def export_conversations():
+    cid = request.args.get("id", "").strip()
+    if cid:
+        conv = _get_conv(cid)
+        if not conv:
+            return jsonify({"error": "对话不存在"}), 404
+        data = [conv]
+    else:
+        data = list(conversations.values())
+    payload = {
+        "type": "ai_chat_conversations_export",
+        "version": 1,
+        "exported_at": int(time.time()),
+        "count": len(data),
+        "conversations": data
+    }
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    fname = "conversations_export_%d.json" % int(time.time())
+    return Response(
+        body,
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=%s" % fname}
+    )
+
+
+@app.route("/api/conversations/import", methods=["POST"])
+def import_conversations():
+    data = request.get_json(silent=True) or {}
+    incoming = data.get("conversations")
+    if incoming is None and isinstance(data, list):
+        incoming = data
+    if not isinstance(incoming, list):
+        if isinstance(data.get("conversations"), list):
+            incoming = data["conversations"]
+        else:
+            return jsonify({"error": "文件格式不正确，缺少 conversations 列表"}), 400
+
+    mode = data.get("mode", "merge")
+    imported = 0
+    skipped = 0
+
+    if mode == "replace":
+        conversations.clear()
+
+    for conv in incoming:
+        if not isinstance(conv, dict):
+            skipped += 1
+            continue
+        cid = conv.get("id")
+        title = conv.get("title", "导入的对话")
+        history = conv.get("history", [])
+        if not isinstance(history, list):
+            skipped += 1
+            continue
+        if not cid or cid in conversations:
+            cid = str(uuid.uuid4())[:8]
+        new_conv = {
+            "id": cid,
+            "title": str(title)[:50] if title else "导入的对话",
+            "agent_id": conv.get("agent_id"),
+            "pinned": bool(conv.get("pinned")),
+            "created": conv.get("created", time.time()),
+            "history": history
+        }
+        conversations[cid] = new_conv
+        imported += 1
+
+    if imported > 0:
+        _save_conversations()
+    return jsonify({"status": "ok", "imported": imported, "skipped": skipped})
+
 
 
 if __name__ == "__main__":
