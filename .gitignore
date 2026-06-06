@@ -8,3 +8,8 @@ web/.polyai.pid
 web/.polyai.log
 web/static/uploads/
 web/.apikey
+# Trae IDE 本地规则配置
+.trae/
+# 根目录运行时产物（误生成的 PID/日志）
+/.polyai.pid
+/.polyai.log

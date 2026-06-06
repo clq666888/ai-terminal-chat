@@ -1012,7 +1012,29 @@ def chat():
             if resp.status_code != 200:
                 mgr.rollback_user_message()
                 stream_state["saved"] = True
-                error_data = json.dumps({"error": f"请求失败 [{resp.status_code}]"}, ensure_ascii=False)
+                upstream_msg = ""
+                try:
+                    err_body = resp.json()
+                    if isinstance(err_body, dict):
+                        err_obj = err_body.get("error", err_body)
+                        if isinstance(err_obj, dict):
+                            upstream_msg = err_obj.get("message", "") or ""
+                        elif isinstance(err_obj, str):
+                            upstream_msg = err_obj
+                except Exception:
+                    try:
+                        upstream_msg = (resp.text or "")[:300]
+                    except Exception:
+                        upstream_msg = ""
+                low = upstream_msg.lower()
+                vision_keywords = ("image", "vision", "multimodal", "multi-modal", "modality", "image_url", "not support")
+                if images and (resp.status_code == 400 or any(k in low for k in vision_keywords)):
+                    friendly = f"当前模型「{chat_cfg['model']}」不支持图片输入，请改用支持视觉的模型，或移除图片后重试。"
+                elif upstream_msg:
+                    friendly = f"请求失败 [{resp.status_code}]：{upstream_msg}"
+                else:
+                    friendly = f"请求失败 [{resp.status_code}]"
+                error_data = json.dumps({"error": friendly}, ensure_ascii=False)
                 yield f"data: {error_data}\n\n"
                 return
 
@@ -1143,6 +1165,70 @@ def retry_conversation(cid):
             removed_user_content = raw
     _save_conversations()
     return jsonify({"status": "ok", "user_message": removed_user_content, "images": removed_images})
+
+
+@app.route("/api/conversations/<cid>/undo", methods=["POST"])
+def undo_conversation(cid):
+    conv = _get_conv(cid)
+    if not conv:
+        return jsonify({"error": "对话不存在"}), 404
+    data = request.get_json() or {}
+
+    history = conv["history"]
+
+    def _is_ask_answer(m):
+        c = m.get("content")
+        return isinstance(c, str) and c.startswith(ASK_ANSWER_PREFIX)
+
+    visible_positions = [
+        i for i, m in enumerate(history)
+        if m.get("role") == "user" and not _is_ask_answer(m)
+    ]
+
+    cut_pos = None
+    visible_index = data.get("visible_index", None)
+    if visible_index is not None and visible_positions:
+        idx = visible_index
+        if idx < 0:
+            idx = 0
+        if idx >= len(visible_positions):
+            idx = len(visible_positions) - 1
+        cut_pos = visible_positions[idx]
+    else:
+        user_index = data.get("user_index", -1)
+        all_user_positions = [i for i, m in enumerate(history) if m.get("role") == "user"]
+        if all_user_positions:
+            idx = user_index
+            if idx < 0:
+                idx = 0
+            if idx >= len(all_user_positions):
+                idx = len(all_user_positions) - 1
+            cut_pos = all_user_positions[idx]
+
+    if cut_pos is None:
+        return jsonify({"status": "ok", "user_message": "", "images": []})
+    removed_user_content = ""
+    removed_images = []
+    raw = history[cut_pos]["content"]
+    if isinstance(raw, list):
+        for block in raw:
+            if block.get("type") == "text":
+                removed_user_content = block.get("text", "")
+            elif block.get("type") == "image_url":
+                removed_images.append(block["image_url"]["url"])
+    else:
+        removed_user_content = raw
+
+    if isinstance(removed_user_content, str) and removed_user_content.startswith(ASK_ANSWER_PREFIX):
+        removed_user_content = removed_user_content[len(ASK_ANSWER_PREFIX):]
+
+    del history[cut_pos:]
+    _save_conversations()
+    return jsonify({
+        "status": "ok",
+        "user_message": removed_user_content,
+        "images": removed_images
+    })
 
 
 if __name__ == "__main__":

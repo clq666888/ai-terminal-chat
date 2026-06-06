@@ -87,6 +87,7 @@ let agentAvatarUrl = "";
 let cachedAgents = [];
 let pendingImages = [];
 let pendingDocs = [];
+let convUserCount = 0;
 
 function renderMarkdown(text) {
     if (typeof marked !== "undefined") {
@@ -114,7 +115,7 @@ if (convSearchInput) {
         renderConvList(convCache);
     });
 }
-btnSend.addEventListener("click", sendMessage);
+btnSend.addEventListener("click", () => sendMessage());
 btnStop.addEventListener("click", stopGeneration);
 userInput.addEventListener("input", autoResize);
 userInput.addEventListener("keydown", e => {
@@ -1078,8 +1079,11 @@ async function switchConversation(cid) {
     if (msgs.length === 0) { showWelcome(); }
     else {
         let lastAiBubble = null;
+        convUserCount = 0;
         msgs.forEach(m => {
             const role = m.role === "user" ? "user" : "ai";
+            const thisUserIndex = (role === "user") ? convUserCount : undefined;
+            if (role === "user") convUserCount++;
             let text = typeof m.content === "string" ? m.content : (m.content.find(c => c.type === "text") || {}).text || "";
             if (role === "user" && typeof text === "string" && text.startsWith("[[ASK_ANSWER]]")) {
                 const target = lastAiBubble || addMessage("ai", "");
@@ -1106,7 +1110,7 @@ async function switchConversation(cid) {
                     }
                 }
             }
-            const renderedBubble = addMessage(role, text, imgs, historyDocs);
+            const renderedBubble = addMessage(role, text, imgs, historyDocs, thisUserIndex);
             if (role === "ai") lastAiBubble = renderedBubble;
         });
         const allMsgs = chatArea.querySelectorAll(".message.ai");
@@ -1137,7 +1141,7 @@ async function deleteConversation(cid) {
     await loadConversations();
 }
 
-function showWelcome() { chatArea.innerHTML = welcomeHTML; }
+function showWelcome() { chatArea.innerHTML = welcomeHTML; convUserCount = 0; }
 function hideWelcome() { const w = chatArea.querySelector(".welcome"); if (w) w.remove(); }
 
 // ==================== 消息渲染与发送 ====================
@@ -1164,7 +1168,7 @@ function shouldAutoScroll() {
     return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 30;
 }
 
-function addMessage(role, content, images, docs) {
+function addMessage(role, content, images, docs, userIndex) {
     hideWelcome();
     const div = document.createElement("div");
     div.className = "message " + role;
@@ -1214,6 +1218,10 @@ function addMessage(role, content, images, docs) {
     }
     div.appendChild(avatar);
     div.appendChild(bubble);
+    if (role === "user") {
+        const uIdx = (typeof userIndex === "number") ? userIndex : convUserCount;
+        appendUndoButton(div, content, images, docs, uIdx);
+    }
     chatArea.appendChild(div);
     chatArea.scrollTop = chatArea.scrollHeight;
     return bubble;
@@ -1275,15 +1283,27 @@ async function retryLastMessage(userText, rolledBack) {
         } else if (messages.length >= 1) {
             messages[messages.length - 1].remove();
         }
+        const savedInput = userInput.value;
+        const savedImages = pendingImages.slice();
+        const savedDocs = pendingDocs.slice();
+        const plainText = restorePendingFromText(data.user_message || "");
         if (data.images && data.images.length > 0) {
             pendingImages = data.images.map((url, i) => ({ name: "image_" + i, base64: url }));
+        }
+        userInput.value = plainText;
+        renderPreviews();
+        autoResize();
+        if (!plainText && pendingImages.length === 0 && pendingDocs.length === 0) {
+            userInput.value = savedInput;
+            pendingImages = savedImages;
+            pendingDocs = savedDocs;
             renderPreviews();
-        }
-        if (data.user_message) {
-            userInput.value = data.user_message;
             autoResize();
-            userInput.focus();
+            await loadConversations();
+            return;
         }
+        await sendMessage();
+        return;
     }
     await loadConversations();
 }
@@ -1297,6 +1317,129 @@ function appendRetryButton(msgDiv, userText, rolledBack) {
     btn.innerHTML = "&#x21bb;";
     btn.addEventListener("click", () => retryLastMessage(userText, rolledBack));
     msgDiv.appendChild(btn);
+}
+
+const UNDO_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M9 14L4 9l5-5"></path><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"></path></svg>';
+
+function appendUndoButton(msgDiv, userText, images, docs, userIndex) {
+    const existing = msgDiv.querySelector(".btn-undo");
+    if (existing) existing.remove();
+    if (typeof userIndex === "number") {
+        msgDiv.dataset.userIndex = String(userIndex);
+    }
+    const btn = document.createElement("button");
+    btn.className = "btn-undo";
+    btn.title = "撤回这条消息（会遗忘其后的对话，内容退回输入框）";
+    btn.innerHTML = UNDO_ICON_SVG;
+    btn.addEventListener("click", () => undoMessage(msgDiv, userText, images, docs));
+    msgDiv.appendChild(btn);
+}
+
+function userMessageIndexOf(msgDiv) {
+    const userMsgs = Array.from(chatArea.querySelectorAll(".message.user"));
+    return userMsgs.indexOf(msgDiv);
+}
+
+function restorePendingFromText(rawText) {
+    let text = String(rawText == null ? "" : rawText);
+    pendingDocs = [];
+    const docRegex = /\[文档: (.+?)\]\n([\s\S]*?)(?=\n\n\[文档:|$)/g;
+    let dm;
+    const restoredDocs = [];
+    while ((dm = docRegex.exec(text)) !== null) {
+        const name = dm[1];
+        const body = dm[2] || "";
+        restoredDocs.push({
+            name: name,
+            text: body,
+            charCount: body.length,
+            truncated: false,
+            loading: false
+        });
+    }
+    if (restoredDocs.length > 0) {
+        const firstDoc = text.indexOf("[文档:");
+        if (firstDoc === 0) {
+            const afterDocs = text.replace(/^(\[文档: .+?\]\n[\s\S]*?)(\n\n(?!\[文档:)[\s\S]*)?$/, "$2").replace(/^\n\n/, "");
+            text = afterDocs || "";
+        }
+        pendingDocs = restoredDocs;
+    }
+    return text;
+}
+
+async function undoMessage(msgDiv, fallbackText, fallbackImages, fallbackDocs) {
+    if (isGenerating || !currentConvId) return;
+
+    const visibleIndex = userMessageIndexOf(msgDiv);
+
+    let images = (fallbackImages || []).slice();
+    const hasStructuredDocs = Array.isArray(fallbackDocs)
+        && fallbackDocs.length > 0
+        && fallbackDocs.every(d => d && typeof d.text === "string" && d.text.length > 0);
+
+    let serverUserMessage = null;
+    let serverImages = null;
+    try {
+        const resp = await fetch("/api/conversations/" + currentConvId + "/undo", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ visible_index: visibleIndex })
+        });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (typeof data.user_message === "string") serverUserMessage = data.user_message;
+            if (Array.isArray(data.images)) serverImages = data.images;
+        }
+    } catch (e) {
+    }
+
+    const allMsgs = Array.from(chatArea.querySelectorAll(".message"));
+    const startIdx = allMsgs.indexOf(msgDiv);
+    if (startIdx >= 0) {
+        for (let i = allMsgs.length - 1; i >= startIdx; i--) {
+            allMsgs[i].remove();
+        }
+    }
+    if (chatArea.querySelectorAll(".message").length === 0) {
+        showWelcome();
+    }
+
+    convUserCount = chatArea.querySelectorAll(".message.user").length;
+
+    let restoredText;
+    if (hasStructuredDocs) {
+        pendingDocs = fallbackDocs.map(d => ({
+            name: d.name,
+            text: d.text,
+            charCount: typeof d.charCount === "number" ? d.charCount : d.text.length,
+            truncated: !!d.truncated,
+            loading: false
+        }));
+        restoredText = (fallbackText != null) ? String(fallbackText) : "";
+    } else {
+        const sourceText = (serverUserMessage != null) ? serverUserMessage : (fallbackText || "");
+        restoredText = restorePendingFromText(sourceText);
+        if (!restoredText && pendingDocs.length === 0 && Array.isArray(fallbackDocs) && fallbackDocs.length > 0) {
+            pendingDocs = fallbackDocs.slice();
+        }
+    }
+
+    if (serverImages && serverImages.length > 0) {
+        images = serverImages;
+    }
+    if (images && images.length > 0) {
+        pendingImages = images.map((url, i) => ({ name: "image_" + i, base64: (typeof url === "string" ? url : url.base64) }));
+    } else {
+        pendingImages = [];
+    }
+    renderPreviews();
+
+    userInput.value = restoredText;
+    autoResize();
+    userInput.focus();
+
+    await loadConversations();
 }
 
 function renderAskSummaryCard(bubble, answerText) {
@@ -1626,8 +1769,9 @@ async function sendMessage(presetText, opts) {
     }
 
     if (!isAskAnswer) {
-        addMessage("user", text, images, docs);
+        addMessage("user", text, images, docs, convUserCount);
     }
+    convUserCount++;
     let renderPending = false;
     let streamEnded = false;
     let rafId = 0;

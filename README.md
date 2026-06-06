@@ -8,9 +8,11 @@
 
 ```
 api调用脚本/
+├── start.py                    # 单文件跨平台一键启动器（依赖自检 + 服务管理）
 ├── web/
 │   ├── app.py                  # Flask 后端 + API 路由 + 配置区
 │   ├── chat_core.py            # 公共核心（API 请求、流式解析、历史管理）
+│   ├── web_search.py           # 联网搜索（智能判断、查询规划、网页抓取与评估）
 │   ├── templates/
 │   │   └── index.html          # 聊天页面
 │   └── static/
@@ -21,8 +23,6 @@ api调用脚本/
 │       └── uploads/            # 智能体头像上传目录（自动创建）
 ├── 提示词/                     # 系统提示词文件目录
 │   └── 无限制.txt
-├── linux_start.sh              # Linux 服务管理脚本（start/stop/restart/status/log）
-├── windows_start.bat           # Windows 服务管理脚本（start/stop/restart/status/log）
 ├── .gitignore
 └── README.md
 ```
@@ -34,6 +34,7 @@ api调用脚本/
 | `web/settings.json` | 运行时配置持久化（服务商、模型、Key 路径等） |
 | `web/agents.json` | 智能体配置持久化 |
 | `web/conversations.json` | 对话历史持久化 |
+| `web/.apikey` | 按服务商分别存储的 API Key（JSON） |
 | `web/.polyai.pid` | 后台进程 PID 文件 |
 | `web/.polyai.log` | 后台运行日志 |
 | `web/static/uploads/` | 智能体头像上传目录 |
@@ -55,32 +56,24 @@ pip install requests flask
 pip install PyPDF2 python-docx openpyxl
 ```
 
+> 使用 `python start.py` 启动时会自动检测以上依赖，缺失时询问并一键安装，通常无需手动执行。
+
 ## 快速启动
 
-**Linux：**
+跨平台单文件启动器 `start.py`，Windows / Linux / macOS 通用。首次运行会自动检测
+Python 版本与依赖，缺失时询问并一键安装，随后后台启动服务并自动打开浏览器。
 
 ```bash
-bash linux_start.sh          # 启动（默认）
-bash linux_start.sh stop     # 关闭
-bash linux_start.sh restart  # 重启
-bash linux_start.sh status   # 查看运行状态
-bash linux_start.sh log      # 查看最近日志
+python start.py            # 启动（默认，可双击运行）
+python start.py stop       # 关闭
+python start.py restart    # 重启
+python start.py status     # 查看运行状态
+python start.py log        # 查看最近日志
+python start.py install    # 仅检测并安装依赖
 ```
 
-脚本以后台进程运行，PID 记录在 `web/.polyai.pid`，日志输出到 `web/.polyai.log`。
+服务以后台进程运行，PID 记录在 `web/.polyai.pid`，日志输出到 `web/.polyai.log`。
 启动时若端口已被占用会自动释放；已在运行时不会重复启动。
-
-**Windows：**
-
-双击 `windows_start.bat` 启动，或在命令行中使用：
-
-```cmd
-windows_start.bat            # 启动（默认）
-windows_start.bat stop       # 关闭
-windows_start.bat restart    # 重启
-windows_start.bat status     # 查看运行状态
-windows_start.bat log        # 查看最近日志
-```
 
 **手动启动：**
 
@@ -97,6 +90,8 @@ python3 app.py
 - 侧边栏创建、切换、删除对话
 - 每个对话独立维护历史记录
 - 对话标题自动生成，支持手动修改
+- 对话置顶，置顶项自动分组排在列表顶部
+- 顶部搜索框按标题实时筛选对话
 - 对话历史持久化到 `conversations.json`，重启不丢失
 
 ### 多模型支持
@@ -136,6 +131,16 @@ python3 app.py
 - 支持图片上传（发送给支持多模态的模型）
 - 单次提取上限 10 万字符
 
+### 智能联网搜索
+- 输入框旁一键开启联网，回答前自动检索互联网最新信息
+- 内置搜索决策器：自动判断本条消息是否需要联网，闲聊 / 写代码 / 翻译等直接跳过，省时省 token
+- 自动规划查询词、抓取并评估网页相关性，回答末尾附「参考来源」
+- 全链路注入真实日期，避免被网页里的旧日期误导对「今天 / 最新」的判断
+
+### AI 追问
+- 当问题信息不足时，AI 可主动发起追问（`[ASK]…[/ASK]` 协议）
+- 前端渲染为可折叠的追问卡片，用户作答后回传并生成摘要卡片
+
 ### 其他
 - 深色主题界面
 - 流式输出（SSE），AI 回复逐字显示
@@ -166,4 +171,4 @@ python3 app.py
 - `settings.json`、`agents.json`、`conversations.json` 已在 `.gitignore` 中排除
 - Flask 开发服务器适合个人使用，不建议暴露到公网
 - `MAX_HISTORY_ROUNDS` 建议设为 20–50，防止 token 消耗过大
-- 启动脚本启动前若端口被占用会自动释放，不会重复启动已运行的实例
+- 启动器启动前若端口被占用会自动释放，不会重复启动已运行的实例
