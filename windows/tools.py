@@ -43,8 +43,8 @@ TOOLS_DEFINITION = [
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["write", "delete"],
-                        "description": "操作类型：write 写入文件，delete 删除文件或空目录"
+                        "enum": ["write", "delete", "patch"],
+                        "description": "操作类型：write 写入完整文件，delete 删除文件或空目录，patch 按原文片段搜索替换局部内容"
                     },
                     "path": {
                         "type": "string",
@@ -53,6 +53,14 @@ TOOLS_DEFINITION = [
                     "content": {
                         "type": "string",
                         "description": "写入的完整文件内容（仅 action=write 时需要）"
+                    },
+                    "old_content": {
+                        "type": "string",
+                        "description": "需要被替换的原文片段（仅 action=patch 时需要，必须与文件内容精确匹配）"
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "替换后的新内容片段（仅 action=patch 时需要）"
                     }
                 },
                 "required": ["action", "path"]
@@ -359,8 +367,49 @@ class ToolExecutor:
 
         if action == "delete":
             return self._do_delete(path, args["path"])
+        elif action == "patch":
+            return self._do_patch(path, args)
         else:
             return self._do_write(path, args)
+
+    def _do_patch(self, path, args):
+        display_path = args["path"]
+        old_content = args.get("old_content", "")
+        new_content = args.get("new_content", "")
+
+        if not old_content:
+            return "[错误] patch 失败：缺少 old_content"
+        if not os.path.exists(path):
+            return f"[错误] patch 失败：文件不存在: {display_path}"
+        if not os.path.isfile(path):
+            return f"[错误] patch 失败：不是文件: {display_path}"
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                file_content = f.read()
+        except Exception as e:
+            return f"[错误] patch 失败：读取文件失败: {e}"
+
+        count = file_content.count(old_content)
+        if count == 0:
+            return f"[错误] patch 失败：未在文件中找到匹配片段: {display_path}"
+        if count > 1:
+            return f"[错误] patch 失败：匹配片段出现 {count} 次，请提供更长、更唯一的 old_content"
+
+        updated_content = file_content.replace(old_content, new_content, 1)
+        old_lines = old_content.count("\n") + 1
+        new_lines = new_content.count("\n") + 1 if new_content else 0
+
+        if not self._confirm(f"局部修改文件: {display_path} ({old_lines} 行 -> {new_lines} 行)"):
+            return "[已取消] 用户拒绝了局部修改操作"
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(updated_content)
+            self._record_diff(display_path, "覆盖", file_content, updated_content)
+            return f"[成功] 已局部修改文件: {display_path}"
+        except Exception as e:
+            return f"[错误] patch 写入失败: {e}"
 
     def _do_write(self, path, args):
         content = args.get("content", "")
@@ -518,8 +567,8 @@ class ToolExecutor:
     def clear_diff_records(self):
         self.diff_records.clear()
 
-    def undo_rounds(self, n):
-        target_rounds = set(range(self.current_round, self.current_round - n, -1))
+    def undo_to_round(self, target_round):
+        target_rounds = set(range(self.current_round, target_round, -1))
         affected = [r for r in self.diff_records if r['round'] in target_rounds]
         restored = []
         if affected:
@@ -545,14 +594,14 @@ class ToolExecutor:
                 except Exception as e:
                     restored.append((p, f'失败: {e}'))
         self.diff_records = [r for r in self.diff_records if r['round'] not in target_rounds]
-        self.current_round = max(self.current_round - n, 0)
+        self.current_round = target_round
         return restored
 
-    def get_undo_preview(self, n):
-        target_rounds = set(range(self.current_round, self.current_round - n, -1))
+    def get_undo_preview_to(self, target_round):
+        target_rounds = set(range(self.current_round, target_round, -1))
         affected = [r for r in self.diff_records if r['round'] in target_rounds]
         if not affected:
-            return n, []
+            return []
         file_map = {}
         for r in affected:
             p = r['path']
@@ -564,7 +613,7 @@ class ToolExecutor:
                 files.append((p, '将删除（此文件由 AI 创建）'))
             else:
                 files.append((p, '将恢复到修改前'))
-        return n, files
+        return files
 
     def _run_command(self, args):
         command = args["command"]

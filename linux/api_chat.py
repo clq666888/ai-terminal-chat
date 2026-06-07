@@ -4,6 +4,8 @@ import os
 import json
 import readline
 import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from chat_core import (
     load_api_key, load_system_prompt, HistoryManager,
@@ -21,7 +23,7 @@ import sys as _sys
 _parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _parent not in _sys.path:
     _sys.path.insert(0, _parent)
-from config_manager import load_config
+from config_manager import load_config, load_project_context, get_sessions_dir
 
 _mcp_dir = os.path.join(_parent, "mcp")
 if _mcp_dir not in _sys.path:
@@ -46,7 +48,9 @@ TOOL_RULES = """
 工具使用原则：
 1. 当用户请求涉及文件操作、代码修改、命令执行时，主动使用工具完成
 2. 修改文件前先读取了解现状
-3. 写入文件时给出完整内容，不要省略
+3. 修改已有文件时优先使用 edit_file 的 patch 模式（action="patch"），只传入要替换的原文片段和新内容，避免整文件覆盖。只有新建文件或小文件整体重写时才使用 write 模式
+4. 使用 patch 模式时，old_content 必须与文件中的原文精确匹配（包括缩进和空格），如果匹配失败会返回错误
+5. 写入新文件时给出完整内容，不要省略
 4. 当用户只是聊天、提问、讨论时，直接回答即可，不需要调用工具
 5. 不要在回复中暴露 API Key、密码等敏感信息
 6. 当你需要向用户提问、确认方案、或获取补充信息时，必须调用 ask_user 工具，禁止在回复文本中直接写问题等待用户回答。ask_user 的结果会立即返回给你，你可以基于用户的回答继续执行后续操作，整个过程不会中断当前任务
@@ -54,9 +58,12 @@ TOOL_RULES = """
 8. 优先使用工具获取准确信息，不要在没有依据的情况下猜测文件内容或改动情况
 9. 你只有上面列出的工具能力，没有任何其他能力（没有联网搜索、没有知识图谱、没有长期记忆存储）。不要向用户声称你拥有未列出的功能"""
 
+PARALLEL_SAFE_TOOLS = {"read_file", "list_dir", "search_files"}
+_print_lock = threading.Lock()
+
 TOOL_DESC_MAP = {
     "read_file": "读取文件内容",
-    "edit_file": "编辑文件（写入/创建/覆盖/删除）",
+    "edit_file": "编辑文件（写入/局部修改/删除）",
     "run_command": "执行 shell 命令",
     "list_dir": "列出目录结构",
     "search_files": "在文件中搜索文本",
@@ -128,6 +135,7 @@ def build_system_prompt(agent_config):
         model_name = current_model if current_model else (agent_config.get("model") or global_agent.get("model", ""))
         display_model = model_name.split("/")[-1] if "/" in model_name else model_name
         prompt += f"\n\n[内部信息，仅在用户主动询问时使用] 当前模型: {display_model}"
+        prompt += load_project_context(WORK_DIR)
         return prompt
     elif perm == 1:
         tool_names = [t["function"]["name"] for t in current_tools]
@@ -156,6 +164,7 @@ def build_system_prompt(agent_config):
     display_model = model_name.split("/")[-1] if "/" in model_name else model_name
     prompt += f"\n\n[内部信息，仅在用户主动询问时使用] 当前模型: {display_model}"
 
+    prompt += load_project_context(WORK_DIR)
     return prompt
 
 
@@ -285,6 +294,12 @@ def format_tool_log(func_name, func_args):
         path = args.get("path", "?")
         if action == "delete":
             return f"  🗑️  删除: {path}"
+        elif action == "patch":
+            old_content = args.get("old_content", "")
+            new_content = args.get("new_content", "")
+            old_lines = old_content.count("\n") + 1 if old_content else 0
+            new_lines = new_content.count("\n") + 1 if new_content else 0
+            return f"  🩹 局部修改: {path} ({old_lines} 行 -> {new_lines} 行)"
         else:
             content = args.get("content", "")
             lines = content.count("\n") + 1
@@ -437,39 +452,130 @@ def _chat_loop(mgr, effective_tools):
         mgr.save_tool_call_message(assistant_msg)
 
         pause_listener()
-        for tc in tool_calls:
-            from terminal_control import abort_flag
-            if abort_flag:
-                print("\n\n🛑 已中断工具执行")
-                mgr.add_interrupt_hint()
-                return None
+        can_parallel = (
+            len(tool_calls) > 1
+            and all(tc["function"]["name"] in PARALLEL_SAFE_TOOLS for tc in tool_calls)
+        )
 
-            func_name = tc["function"]["name"]
-            func_args = tc["function"]["arguments"]
-            tc_id = tc["id"]
+        if can_parallel:
+            results_map = {}
 
-            if func_name == "call_agent":
-                _args = json.loads(func_args) if isinstance(func_args, str) else func_args
-                _agent_id = _args.get("agent_id", "")
-                result = run_sub_agent(_agent_id, _args.get("message", ""))
-                if result.startswith("[错误]"):
-                    print(f"  🤖 @{_agent_id} 调用失败: {result}")
+            def _run_parallel(tc):
+                fn = tc["function"]["name"]
+                fa = tc["function"]["arguments"]
+                tid = tc["id"]
+                with _print_lock:
+                    print(format_tool_log(fn, fa))
+                res = tool_executor.execute(fn, fa)
+                return tid, res
+
+            with ThreadPoolExecutor(max_workers=min(len(tool_calls), 8)) as pool:
+                futures = {pool.submit(_run_parallel, tc): tc for tc in tool_calls}
+                for future in as_completed(futures):
+                    from terminal_control import abort_flag
+                    if abort_flag:
+                        print("\n\n🛑 已中断工具执行")
+                        mgr.add_interrupt_hint()
+                        resume_listener()
+                        return None
+                    tid, res = future.result()
+                    results_map[tid] = res
+
+            for tc in tool_calls:
+                mgr.save_tool_result(tc["id"], results_map[tc["id"]])
+        else:
+            for tc in tool_calls:
+                from terminal_control import abort_flag
+                if abort_flag:
+                    print("\n\n🛑 已中断工具执行")
+                    mgr.add_interrupt_hint()
+                    resume_listener()
+                    return None
+
+                func_name = tc["function"]["name"]
+                func_args = tc["function"]["arguments"]
+                tc_id = tc["id"]
+
+                if func_name == "call_agent":
+                    _args = json.loads(func_args) if isinstance(func_args, str) else func_args
+                    _agent_id = _args.get("agent_id", "")
+                    result = run_sub_agent(_agent_id, _args.get("message", ""))
+                    if result.startswith("[错误]"):
+                        print(f"  🤖 @{_agent_id} 调用失败: {result}")
+                    else:
+                        print(f"  🤖 @{_agent_id}:")
+                        print(f"  {result}")
+                elif mcp_mgr.is_mcp_tool(func_name):
+                    print(format_tool_log(func_name, func_args))
+                    result = mcp_mgr.call_tool(func_name, func_args)
                 else:
-                    print(f"  🤖 @{_agent_id}:")
-                    print(f"  {result}")
-            elif mcp_mgr.is_mcp_tool(func_name):
-                print(format_tool_log(func_name, func_args))
-                result = mcp_mgr.call_tool(func_name, func_args)
-            else:
-                print(format_tool_log(func_name, func_args))
-                result = tool_executor.execute(func_name, func_args)
-            mgr.save_tool_result(tc_id, result)
+                    print(format_tool_log(func_name, func_args))
+                    result = tool_executor.execute(func_name, func_args)
+                mgr.save_tool_result(tc_id, result)
         resume_listener()
 
         continue
 
     print("\n⚠️ 达到最大工具调用轮数，停止执行")
     return None
+
+def _save_session(name=None):
+    from datetime import datetime
+    sessions_dir = get_sessions_dir()
+    if not name:
+        name = "autosave"
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    filepath = os.path.join(sessions_dir, f"{safe_name}.json")
+    agent_id = current_agent["id"] if current_agent else "global"
+    data = {
+        "agent_id": agent_id,
+        "model": current_model,
+        "history": current_history,
+        "diff_records": tool_executor.diff_records,
+        "current_round": tool_executor.current_round,
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return safe_name, filepath
+    except Exception as e:
+        return None, str(e)
+
+
+def _load_session(name):
+    sessions_dir = get_sessions_dir()
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    filepath = os.path.join(sessions_dir, f"{safe_name}.json")
+    if not os.path.isfile(filepath):
+        return None, f"会话文件不存在: {safe_name}"
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _list_sessions():
+    sessions_dir = get_sessions_dir()
+    files = []
+    for fname in os.listdir(sessions_dir):
+        if fname.endswith(".json"):
+            fpath = os.path.join(sessions_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                name = fname[:-5]
+                saved_at = data.get("saved_at", "未知")
+                agent_id = data.get("agent_id", "?")
+                rounds = sum(1 for m in data.get("history", []) if m.get("role") == "user")
+                files.append((name, saved_at, agent_id, rounds))
+            except Exception:
+                files.append((fname[:-5], "读取失败", "?", 0))
+    files.sort(key=lambda x: x[1], reverse=True)
+    return files
+
 
 def _do_compress(mgr, silent=False):
     if not silent:
@@ -549,6 +655,8 @@ def main():
                 continue
 
         if user_text.lower() == "/exit":
+            if current_history:
+                _save_session("autosave")
             print("对话结束")
             break
 
@@ -561,25 +669,31 @@ def main():
 
         if user_text.lower().startswith("/undo"):
             undo_arg = user_text[5:].strip()
-            undo_n = 1
-            if undo_arg:
+            if not undo_arg:
+                target_round = tool_executor.current_round - 1
+            else:
                 try:
-                    undo_n = int(undo_arg)
-                    if undo_n < 1:
-                        print("⚠️ 请输入正整数\n")
+                    target_round = int(undo_arg)
+                    if target_round < 0:
+                        print("⚠️ 请输入非负整数\n")
                         continue
                 except ValueError:
-                    print("⚠️ 格式错误，用法: /undo 或 /undo N\n")
+                    print("⚠️ 格式错误，用法: /undo 或 /undo N（回退到第N轮）\n")
                     continue
+
+            if target_round >= tool_executor.current_round:
+                print(f"⚠️ 当前已在第 {tool_executor.current_round} 轮，无法回退到第 {target_round} 轮\n")
+                continue
 
             if len(current_history) <= 1:
                 print("⚠️ 没有可撤销的对话\n")
                 continue
 
-            actual_n, file_preview = tool_executor.get_undo_preview(undo_n)
+            rounds_to_undo = tool_executor.current_round - target_round
+            file_preview = tool_executor.get_undo_preview_to(target_round)
             history_rounds = 0
             tmp_hist = list(current_history)
-            for _ in range(undo_n):
+            for _ in range(rounds_to_undo):
                 if len(tmp_hist) <= 1:
                     break
                 removed_one = False
@@ -593,7 +707,7 @@ def main():
                 history_rounds += 1
 
             print(f"\n\033[31m⚠️  警告：此操作不可撤回！\033[0m")
-            print(f"  将撤回最近 {max(undo_n, history_rounds)} 轮对话记录")
+            print(f"  将回退到第 {target_round} 轮（撤回第 {target_round + 1}~{tool_executor.current_round} 轮）")
             if file_preview:
                 print(f"  并恢复以下 {len(file_preview)} 个文件:")
                 for fp, desc in file_preview:
@@ -609,10 +723,10 @@ def main():
                 print("已取消\n")
                 continue
 
-            restored = tool_executor.undo_rounds(undo_n)
+            restored = tool_executor.undo_to_round(target_round)
 
             removed_msgs = 0
-            for _ in range(undo_n):
+            for _ in range(rounds_to_undo):
                 if len(current_history) <= 1:
                     break
                 removed_one = False
@@ -626,7 +740,7 @@ def main():
                     removed_msgs += 1
                     removed_one = True
 
-            print(f"\n↩️  已撤回 {history_rounds} 轮对话（移除 {removed_msgs} 条消息）")
+            print(f"\n↩️  已回退到第 {target_round} 轮（撤回 {history_rounds} 轮对话，移除 {removed_msgs} 条消息）")
             if restored:
                 for fp, status in restored:
                     print(f"  📄 {fp} → {status}")
@@ -646,12 +760,15 @@ def main():
             print("\n📋 可用指令:")
             print("  /exit     - 退出程序")
             print("  /clear    - 清空当前对话记忆")
-            print("  /undo [N]  - 撤回最近 N 轮对话及文件改动（默认1轮）")
+            print("  /undo [N]  - 回退到第 N 轮（默认回退1轮）")
             print("  /compress - 压缩历史记忆（减少 token 占用）")
             print("  /reload   - 重新加载配置和智能体")
             print("  /agents   - 查看所有智能体列表")
             print("  /diff       - 查看 AI 的文件改动记录")
             print("  /mcp      - 查看已加载的 MCP 工具")
+            print("  /save [名] - 保存当前会话")
+            print("  /load <名> - 恢复已保存的会话")
+            print("  /sessions - 查看所有已保存会话")
             print("  /list     - 显示本指令列表")
             print()
             print("📋 特殊输入:")
@@ -659,6 +776,8 @@ def main():
             print("  @名称 内容 - 切换并直接对话")
             print('  \"\"\"       - 进入多行输入模式')
             print("  Ctrl+Q    - 中断 AI 生成或工具执行")
+            print()
+            print("  📖 详细说明见项目根目录 指令操作指南.md")
             print()
             continue
 
@@ -686,8 +805,7 @@ def main():
             def _build_display_list(groups, cur):
                 display = []
                 for grp in groups:
-                    ago = cur - grp[0]["round"]
-                    when = f"\u524d{ago + 1}\u8f6e\u5bf9\u8bdd"
+                    when = f"\u7b2c{grp[0]['round']}\u8f6e\u5bf9\u8bdd"
                     if len(grp) <= 3:
                         for r in grp:
                             act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
@@ -698,8 +816,7 @@ def main():
                 return display
 
             def _show_detail(r, cur):
-                ago = cur - r["round"]
-                when = f"\u524d{ago + 1}\u8f6e\u5bf9\u8bdd"
+                when = f"\u7b2c{r['round']}\u8f6e\u5bf9\u8bdd"
                 act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
                 act = act_map.get(r["action"], r["action"])
                 print(f"\n\U0001f4c4 [{r['time']}] \u4e8e{when}\u4e2d{act} {r['path']}")
@@ -800,8 +917,7 @@ def main():
                     else:
                         print(f"\n\U0001f4c4 {file_path} \u7684\u6539\u52a8\u5386\u53f2\uff08\u5171 {len(file_records)} \u6761\uff09:")
                         for i, r in enumerate(file_records, 1):
-                            ago = cur - r["round"]
-                            when = f"\u524d{ago + 1}\u8f6e\u5bf9\u8bdd"
+                            when = f"\u7b2c{r['round']}\u8f6e\u5bf9\u8bdd"
                             act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
                             act = act_map.get(r["action"], r["action"])
                             print(f"  {i}. [{r['time']}] \u4e8e{when}\u4e2d{act}")
@@ -823,6 +939,48 @@ def main():
                 print(f"  将 MCP 配置文件放入 mcp/servers/ 目录即可自动加载")
             print()
             continue
+
+        if user_text.lower().startswith("/save"):
+            save_name = user_text[5:].strip() or None
+            result_name, result_info = _save_session(save_name)
+            if result_name:
+                print(f"\n💾 会话已保存: {result_name}\n")
+            else:
+                print(f"\n❌ 保存失败: {result_info}\n")
+            continue
+
+        if user_text.lower().startswith("/load"):
+            load_name = user_text[5:].strip()
+            if not load_name:
+                print("\n⚠️ 用法: /load <名称>\n   使用 /sessions 查看可用会话\n")
+                continue
+            data, err = _load_session(load_name)
+            if err:
+                print(f"\n❌ {err}\n")
+                continue
+            agent_id = data.get("agent_id", "global")
+            switch_agent(agent_id, silent=True)
+            current_history.clear()
+            current_history.extend(data["history"])
+            if "diff_records" in data:
+                tool_executor.diff_records = data["diff_records"]
+                tool_executor.current_round = data.get("current_round", 0)
+            rounds = sum(1 for m in current_history if m.get("role") == "user")
+            print(f"\n📂 已恢复会话: {load_name} (@{agent_id}, {rounds} 轮对话)")
+            print(f"   保存时间: {data.get('saved_at', '未知')}\n")
+            continue
+
+        if user_text.lower() == "/sessions":
+            sessions = _list_sessions()
+            if not sessions:
+                print("\n📁 暂无保存的会话\n   使用 /save [名称] 保存当前对话\n")
+            else:
+                print(f"\n📁 已保存的会话 ({len(sessions)} 个):")
+                for name, saved_at, agent_id, rounds in sessions:
+                    print(f"  - {name}  [{saved_at}]  @{agent_id}  {rounds}轮")
+                print(f"\n   /load <名称> 恢复会话\n")
+            continue
+
 
         if user_text.lower() == "/reload":
             _cfg.update(load_config())

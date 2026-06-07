@@ -4,6 +4,14 @@ import os
 import platform
 import subprocess
 
+if sys.platform == "win32":
+    os.system("chcp 65001 >nul 2>&1")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 REQUIRED_PACKAGES = {
