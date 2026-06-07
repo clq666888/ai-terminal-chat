@@ -5,6 +5,7 @@
 }
 
 :root {
+    color-scheme: dark;
     --bg-primary: #0f0f1a;
     --bg-sidebar: #141422;
     --bg-header: #16162a;
@@ -23,6 +24,28 @@
     --danger: #ef4444;
     --sidebar-width: 260px;
     --settings-bg: #181830;
+    --chat-font-size: 14px;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
+    --bg-primary: #f5f6fa;
+    --bg-sidebar: #eceef4;
+    --bg-header: #ffffff;
+    --bg-chat: #f5f6fa;
+    --bg-input: #ffffff;
+    --bg-user-msg: #2563eb;
+    --bg-ai-msg: #ffffff;
+    --bg-hover: #e6e8f0;
+    --bg-active: #dfe3ef;
+    --text-primary: #1c1e2b;
+    --text-secondary: #5b6072;
+    --text-dim: #9499aa;
+    --accent: #3b62f6;
+    --accent-hover: #2c4fe0;
+    --border: #d6d9e4;
+    --danger: #dc2626;
+    --settings-bg: #ffffff;
 }
 
 body {
@@ -529,7 +552,7 @@ body.resizing .sidebar {
     padding: 10px 16px;
     border-radius: 14px;
     line-height: 1.75;
-    font-size: 14px;
+    font-size: var(--chat-font-size);
     word-break: break-word;
     white-space: pre-wrap;
 }
@@ -1764,6 +1787,15 @@ body.resizing .sidebar {
     display: block;
 }
 
+.msg-time {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-dim);
+    user-select: none;
+    white-space: nowrap;
+    align-self: center;
+}
+
 /* ==================== 代码块顶部栏 ==================== */
 .bubble pre.code-block-wrap {
     position: relative;
@@ -2772,4 +2804,44 @@ body.resizing .sidebar {
     font-size: 13px;
     line-height: 1.6;
     text-align: center;
+}
+
+/* ==================== KaTeX 公式 ==================== */
+.bubble .katex-display {
+    margin: 10px 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px 0;
+}
+.bubble .katex {
+    font-size: 1.05em;
+    white-space: normal;
+}
+
+/* ==================== 设置：字号滑块 ==================== */
+#set-chat-font-size {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    outline: none;
+    cursor: pointer;
+}
+#set-chat-font-size::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+}
+#set-chat-font-size::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border: none;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
 }

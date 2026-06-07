@@ -21,9 +21,6 @@ import csv
 import io
 
 # ==================== 配置区 ====================
-BASE_URL = "https://api.deepseek.com"
-MODEL = ""
-AI_NAME = "AI Chat"
 MAX_HISTORY_ROUNDS = 50
 HOST = "0.0.0.0"
 PORT = 8080
@@ -90,7 +87,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 def _default_config():
     return {
-        "base_url": BASE_URL,
+        "base_url": "",
         "api_key": "",
         "api_keys": {},
         "model": "",
@@ -202,11 +199,30 @@ def _load_conversations():
     return {}
 
 
+_save_lock = threading.Lock()
+_conv_locks = {}
+_conv_locks_guard = threading.Lock()
+
+
+def _get_conv_lock(cid):
+    with _conv_locks_guard:
+        lock = _conv_locks.get(cid)
+        if lock is None:
+            lock = threading.Lock()
+            _conv_locks[cid] = lock
+        return lock
+
+
 def _save_conversations():
     try:
         data = list(conversations.values())
-        with open(CONVERSATIONS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+        with _save_lock:
+            tmp = CONVERSATIONS_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, CONVERSATIONS_FILE)
     except Exception:
         pass
 
@@ -500,6 +516,7 @@ def _new_conversation(agent_id=None):
         "agent_id": agent_id,
         "history": history,
         "created": time.time(),
+        "updated": time.time(),
         "pinned": False
     }
     _save_conversations()
@@ -882,11 +899,13 @@ def set_current_agent():
 def list_conversations():
     result = []
     ordered = sorted(conversations.values(),
-                     key=lambda x: (1 if x.get("pinned") else 0, x["created"]),
+                     key=lambda x: (1 if x.get("pinned") else 0,
+                                    x.get("updated") or x.get("created") or 0),
                      reverse=True)
     for c in ordered:
         result.append({"id": c["id"], "title": c["title"],
-                       "agent_id": c.get("agent_id"), "pinned": bool(c.get("pinned"))})
+                       "agent_id": c.get("agent_id"), "pinned": bool(c.get("pinned")),
+                       "updated": c.get("updated") or c.get("created") or 0})
     return jsonify(result)
 
 
@@ -902,8 +921,14 @@ def create_conversation():
 @app.route("/api/conversations/<cid>", methods=["DELETE"])
 def delete_conversation(cid):
     if cid in conversations:
-        del conversations[cid]
-        _save_conversations()
+        lock = _get_conv_lock(cid)
+        if not lock.acquire(blocking=False):
+            return jsonify({"error": "当前对话正在生成回复，请等待完成后再操作", "busy": True}), 409
+        try:
+            del conversations[cid]
+            _save_conversations()
+        finally:
+            lock.release()
     return jsonify({"status": "ok"})
 
 
@@ -980,6 +1005,19 @@ def chat():
 
     history = conv["history"]
     mgr = HistoryManager(history, runtime_config["max_history_rounds"], "AI")
+
+    _conv_lock = _get_conv_lock(cid)
+    if not _conv_lock.acquire(blocking=False):
+        return jsonify({"error": "当前对话正在生成回复，请等待完成后再发送", "busy": True}), 409
+    _lock_released = {"done": False}
+
+    def _release_conv_lock():
+        if not _lock_released["done"]:
+            _lock_released["done"] = True
+            try:
+                _conv_lock.release()
+            except Exception:
+                pass
 
     if images:
         content_blocks = []
@@ -1221,8 +1259,14 @@ def chat():
             if _sr and _sr.get("sources"):
                 src_data = json.dumps({"sources": _sr["sources"]}, ensure_ascii=False)
                 yield f"data: {src_data}\n\n"
+            conv["updated"] = time.time()
+            if history and history[-1].get("role") == "assistant":
+                history[-1]["ts"] = int(time.time())
             stream_state["saved"] = True
             _save_conversations()
+            ts_data = json.dumps({"ts": int(time.time())}, ensure_ascii=False)
+            yield f"data: {ts_data}\n\n"
+            _release_conv_lock()
             yield "data: [DONE]\n\n"
 
         except GeneratorExit:
@@ -1253,6 +1297,7 @@ def chat():
                     mgr.rollback_user_message()
             stream_state["saved"] = True
             _save_conversations()
+        _release_conv_lock()
 
 
     resp = Response(stream_with_context(generate()), mimetype="text/event-stream")
@@ -1266,13 +1311,19 @@ def clear_conversation(cid):
     conv = _get_conv(cid)
     if not conv:
         return jsonify({"error": "对话不存在"}), 404
-    agent_id = conv.get("agent_id")
-    conv["history"].clear()
-    system_content = _get_system_content(agent_id)
-    if system_content:
-        conv["history"].append({"role": "system", "content": system_content})
-    _save_conversations()
-    return jsonify({"status": "ok"})
+    lock = _get_conv_lock(cid)
+    if not lock.acquire(blocking=False):
+        return jsonify({"error": "当前对话正在生成回复，请等待完成后再操作", "busy": True}), 409
+    try:
+        agent_id = conv.get("agent_id")
+        conv["history"].clear()
+        system_content = _get_system_content(agent_id)
+        if system_content:
+            conv["history"].append({"role": "system", "content": system_content})
+        _save_conversations()
+        return jsonify({"status": "ok"})
+    finally:
+        lock.release()
 
 
 @app.route("/api/conversations/<cid>/retry", methods=["POST"])
@@ -1280,13 +1331,78 @@ def retry_conversation(cid):
     conv = _get_conv(cid)
     if not conv:
         return jsonify({"error": "对话不存在"}), 404
-    history = conv["history"]
-    removed_user_content = ""
-    removed_images = []
-    if history and history[-1]["role"] == "assistant":
-        history.pop()
-    if history and history[-1]["role"] == "user":
-        raw = history.pop()["content"]
+    lock = _get_conv_lock(cid)
+    if not lock.acquire(blocking=False):
+        return jsonify({"error": "当前对话正在生成回复，请等待完成后再操作", "busy": True}), 409
+    try:
+        history = conv["history"]
+        removed_user_content = ""
+        removed_images = []
+        if history and history[-1]["role"] == "assistant":
+            history.pop()
+        if history and history[-1]["role"] == "user":
+            raw = history.pop()["content"]
+            if isinstance(raw, list):
+                for block in raw:
+                    if block.get("type") == "text":
+                        removed_user_content = block.get("text", "")
+                    elif block.get("type") == "image_url":
+                        removed_images.append(block["image_url"]["url"])
+            else:
+                removed_user_content = raw
+        _save_conversations()
+        return jsonify({"status": "ok", "user_message": removed_user_content, "images": removed_images})
+    finally:
+        lock.release()
+
+
+@app.route("/api/conversations/<cid>/undo", methods=["POST"])
+def undo_conversation(cid):
+    conv = _get_conv(cid)
+    if not conv:
+        return jsonify({"error": "对话不存在"}), 404
+    lock = _get_conv_lock(cid)
+    if not lock.acquire(blocking=False):
+        return jsonify({"error": "当前对话正在生成回复，请等待完成后再操作", "busy": True}), 409
+    try:
+        data = request.get_json() or {}
+
+        history = conv["history"]
+
+        def _is_ask_answer(m):
+            c = m.get("content")
+            return isinstance(c, str) and c.startswith(ASK_ANSWER_PREFIX)
+
+        visible_positions = [
+            i for i, m in enumerate(history)
+            if m.get("role") == "user" and not _is_ask_answer(m)
+        ]
+
+        cut_pos = None
+        visible_index = data.get("visible_index", None)
+        if visible_index is not None and visible_positions:
+            idx = visible_index
+            if idx < 0:
+                idx = 0
+            if idx >= len(visible_positions):
+                idx = len(visible_positions) - 1
+            cut_pos = visible_positions[idx]
+        else:
+            user_index = data.get("user_index", -1)
+            all_user_positions = [i for i, m in enumerate(history) if m.get("role") == "user"]
+            if all_user_positions:
+                idx = user_index
+                if idx < 0:
+                    idx = 0
+                if idx >= len(all_user_positions):
+                    idx = len(all_user_positions) - 1
+                cut_pos = all_user_positions[idx]
+
+        if cut_pos is None:
+            return jsonify({"status": "ok", "user_message": "", "images": []})
+        removed_user_content = ""
+        removed_images = []
+        raw = history[cut_pos]["content"]
         if isinstance(raw, list):
             for block in raw:
                 if block.get("type") == "text":
@@ -1295,72 +1411,19 @@ def retry_conversation(cid):
                     removed_images.append(block["image_url"]["url"])
         else:
             removed_user_content = raw
-    _save_conversations()
-    return jsonify({"status": "ok", "user_message": removed_user_content, "images": removed_images})
 
+        if isinstance(removed_user_content, str) and removed_user_content.startswith(ASK_ANSWER_PREFIX):
+            removed_user_content = removed_user_content[len(ASK_ANSWER_PREFIX):]
 
-@app.route("/api/conversations/<cid>/undo", methods=["POST"])
-def undo_conversation(cid):
-    conv = _get_conv(cid)
-    if not conv:
-        return jsonify({"error": "对话不存在"}), 404
-    data = request.get_json() or {}
-
-    history = conv["history"]
-
-    def _is_ask_answer(m):
-        c = m.get("content")
-        return isinstance(c, str) and c.startswith(ASK_ANSWER_PREFIX)
-
-    visible_positions = [
-        i for i, m in enumerate(history)
-        if m.get("role") == "user" and not _is_ask_answer(m)
-    ]
-
-    cut_pos = None
-    visible_index = data.get("visible_index", None)
-    if visible_index is not None and visible_positions:
-        idx = visible_index
-        if idx < 0:
-            idx = 0
-        if idx >= len(visible_positions):
-            idx = len(visible_positions) - 1
-        cut_pos = visible_positions[idx]
-    else:
-        user_index = data.get("user_index", -1)
-        all_user_positions = [i for i, m in enumerate(history) if m.get("role") == "user"]
-        if all_user_positions:
-            idx = user_index
-            if idx < 0:
-                idx = 0
-            if idx >= len(all_user_positions):
-                idx = len(all_user_positions) - 1
-            cut_pos = all_user_positions[idx]
-
-    if cut_pos is None:
-        return jsonify({"status": "ok", "user_message": "", "images": []})
-    removed_user_content = ""
-    removed_images = []
-    raw = history[cut_pos]["content"]
-    if isinstance(raw, list):
-        for block in raw:
-            if block.get("type") == "text":
-                removed_user_content = block.get("text", "")
-            elif block.get("type") == "image_url":
-                removed_images.append(block["image_url"]["url"])
-    else:
-        removed_user_content = raw
-
-    if isinstance(removed_user_content, str) and removed_user_content.startswith(ASK_ANSWER_PREFIX):
-        removed_user_content = removed_user_content[len(ASK_ANSWER_PREFIX):]
-
-    del history[cut_pos:]
-    _save_conversations()
-    return jsonify({
-        "status": "ok",
-        "user_message": removed_user_content,
-        "images": removed_images
-    })
+        del history[cut_pos:]
+        _save_conversations()
+        return jsonify({
+            "status": "ok",
+            "user_message": removed_user_content,
+            "images": removed_images
+        })
+    finally:
+        lock.release()
 @app.route("/api/conversations/export", methods=["GET"])
 def export_conversations():
     cid = request.args.get("id", "").strip()
@@ -1424,6 +1487,7 @@ def import_conversations():
             "agent_id": conv.get("agent_id"),
             "pinned": bool(conv.get("pinned")),
             "created": conv.get("created", time.time()),
+            "updated": conv.get("updated") or conv.get("created") or time.time(),
             "history": history
         }
         conversations[cid] = new_conv

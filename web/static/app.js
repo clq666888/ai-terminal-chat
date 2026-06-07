@@ -92,15 +92,41 @@ let pendingImages = [];
 let pendingDocs = [];
 let convUserCount = 0;
 
+let _markedConfigured = false;
+function _ensureMarkedConfig() {
+    if (_markedConfigured || typeof marked === "undefined" || !marked.setOptions) return;
+    try {
+        marked.setOptions({ gfm: true, breaks: true });
+    } catch (e) { /* 忽略 */ }
+    _markedConfigured = true;
+}
+
 function renderMarkdown(text) {
     if (typeof marked !== "undefined") {
         try {
+            _ensureMarkedConfig();
             return marked.parse(text);
         } catch (e) {
             return escapeHtml(text).replace(/\n/g, "<br>");
         }
     }
     return escapeHtml(text).replace(/\n/g, "<br>");
+}
+
+function renderMathInElement_safe(el) {
+    if (!el || typeof window.renderMathInElement !== "function") return;
+    try {
+        window.renderMathInElement(el, {
+            delimiters: [
+                { left: "$$", right: "$$", display: true },
+                { left: "\\[", right: "\\]", display: true },
+                { left: "\\(", right: "\\)", display: false },
+                { left: "$", right: "$", display: false }
+            ],
+            throwOnError: false,
+            ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+        });
+    } catch (e) { /* 公式渲染失败保持原样 */ }
 }
 
 const DEFAULT_AVATAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>';
@@ -768,7 +794,7 @@ async function onAddProviderChange() {
     const key = addProvider.value;
     const p = providers[key];
     if (!p) return;
-    if (p.base_url) setBaseUrl.value = p.base_url;
+    setBaseUrl.value = p.base_url || "";
     addModel.innerHTML = "";
     if (p.models && p.models.length > 0) {
         p.models.forEach(m => {
@@ -778,11 +804,23 @@ async function onAddProviderChange() {
             addModel.appendChild(opt);
         });
     }
-    const customOpt = document.createElement("option");
-    customOpt.value = "__custom__";
-    customOpt.textContent = "-- 自定义模型名 --";
-    addModel.appendChild(customOpt);
-    addModelCustom.style.display = "none";
+    const hasPreset = p.models && p.models.length > 0;
+    if (hasPreset) {
+        const customOpt = document.createElement("option");
+        customOpt.value = "__custom__";
+        customOpt.textContent = "-- 自定义模型名 --";
+        addModel.appendChild(customOpt);
+        addModel.style.display = "";
+        addModelCustom.style.display = (addModel.value === "__custom__") ? "block" : "none";
+    } else {
+        const customOpt = document.createElement("option");
+        customOpt.value = "__custom__";
+        customOpt.textContent = "-- 自定义模型名 --";
+        addModel.appendChild(customOpt);
+        addModel.value = "__custom__";
+        addModel.style.display = "none";
+        addModelCustom.style.display = "block";
+    }
     addModelCustom.value = "";
     setApiKey.value = "";
     try {
@@ -827,11 +865,14 @@ async function renderCustomModelList() {
             setBaseUrl.value = m.base_url || "";
             if (addModel.querySelector('option[value="' + m.model + '"]')) {
                 addModel.value = m.model;
+                addModel.style.display = "";
                 addModelCustom.style.display = "none";
             } else {
                 addModel.value = "__custom__";
                 addModelCustom.value = m.model;
                 addModelCustom.style.display = "block";
+                const ep = providers[m.provider];
+                addModel.style.display = (ep && ep.models && ep.models.length > 0) ? "" : "none";
             }
             btnSaveApiConfig.dataset.editingKey = m.provider + "|" + m.model;
             btnSaveApiConfig.textContent = "保存修改";
@@ -1015,20 +1056,49 @@ function renderConvList(list) {
         return;
     }
 
-    if (pinned.length > 0) {
+    const appendSection = (label, items) => {
+        if (items.length === 0) return;
         const sec = document.createElement("div");
         sec.className = "conv-section-label";
-        sec.textContent = "置顶";
+        sec.textContent = label;
         convList.appendChild(sec);
-        pinned.forEach(c => convList.appendChild(buildConvItem(c)));
-        if (normal.length > 0) {
-            const sec2 = document.createElement("div");
-            sec2.className = "conv-section-label";
-            sec2.textContent = "全部对话";
-            convList.appendChild(sec2);
-        }
+        items.forEach(c => convList.appendChild(buildConvItem(c)));
+    };
+
+    if (pinned.length > 0) {
+        appendSection("置顶", pinned);
     }
-    normal.forEach(c => convList.appendChild(buildConvItem(c)));
+
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const DAY = 86400000;
+    const buckets = [
+        { label: "今天", items: [] },
+        { label: "昨天", items: [] },
+        { label: "7 天内", items: [] },
+        { label: "30 天内", items: [] },
+        { label: "2 个月内", items: [] },
+        { label: "3 个月内", items: [] },
+        { label: "1 年内", items: [] },
+        { label: "更早", items: [] }
+    ];
+
+    const sorted = normal.slice().sort((a, b) => (b.updated || 0) - (a.updated || 0));
+    sorted.forEach(c => {
+        const t = (c.updated || 0) * 1000;
+        let idx;
+        if (t >= startOfToday) idx = 0;
+        else if (t >= startOfToday - DAY) idx = 1;
+        else if (t >= startOfToday - 7 * DAY) idx = 2;
+        else if (t >= startOfToday - 30 * DAY) idx = 3;
+        else if (t >= startOfToday - 60 * DAY) idx = 4;
+        else if (t >= startOfToday - 90 * DAY) idx = 5;
+        else if (t >= startOfToday - 365 * DAY) idx = 6;
+        else idx = 7;
+        buckets[idx].items.push(c);
+    });
+
+    buckets.forEach(b => appendSection(b.label, b.items));
 }
 
 async function renameConversation(c) {
@@ -1117,13 +1187,14 @@ async function switchConversation(cid) {
             if (role === "ai") {
                 lastAiBubble = renderedBubble;
                 const aiMsgDiv = renderedBubble.closest(".message");
-                attachAiActions(aiMsgDiv, text, { allowRegen: false });
+                attachAiActions(aiMsgDiv, text, { allowRegen: false, ts: m.ts });
             }
         });
         const allMsgs = chatArea.querySelectorAll(".message.ai");
         if (allMsgs.length > 0) {
             const lastAiMsg = allMsgs[allMsgs.length - 1];
-            attachAiActions(lastAiMsg, lastAiMsg.dataset.rawText || "", { allowRegen: true });
+            const lastTs = lastAiMsg.dataset.ts ? parseInt(lastAiMsg.dataset.ts, 10) : undefined;
+            attachAiActions(lastAiMsg, lastAiMsg.dataset.rawText || "", { allowRegen: true, ts: lastTs });
         }
     }
     isBatchRendering = false;
@@ -1342,7 +1413,16 @@ function appendUndoButton(msgDiv, userText, images, docs, userIndex) {
     btn.className = "btn-undo";
     btn.title = "撤回这条消息（会遗忘其后的对话，内容退回输入框）";
     btn.innerHTML = UNDO_ICON_SVG;
-    btn.addEventListener("click", () => undoMessage(msgDiv, userText, images, docs));
+    btn.addEventListener("click", async () => {
+        const ok = await confirmDialog("撤回这条消息会遗忘其后的所有对话，消息内容将退回输入框。确定撤回吗？", {
+            title: "撤回消息",
+            icon: "\u21A9\uFE0F",
+            okText: "撤回",
+            cancelText: "取消"
+        });
+        if (!ok) return;
+        undoMessage(msgDiv, userText, images, docs);
+    });
     msgDiv.appendChild(btn);
 }
 
@@ -1825,6 +1905,7 @@ async function sendMessage(presetText, opts) {
     let searchStatusText = "";
     let searchSources = [];
     let askPayload = null;
+    let streamMsgTs = 0;
 
     let messageText = text;
     if (docs.length > 0) {
@@ -1852,10 +1933,35 @@ async function sendMessage(presetText, opts) {
 
         if (!resp.ok) {
             let errMsg = "请求失败 (" + resp.status + ")";
+            let isBusy = false;
             try {
                 const errData = await resp.json();
                 if (errData.error) errMsg = errData.error;
+                if (errData.busy) isBusy = true;
             } catch {}
+            if (isBusy || resp.status === 409) {
+                const aiMsg = bubble.closest(".message");
+                if (aiMsg) aiMsg.remove();
+                if (!isAskAnswer) {
+                    const userMsgs = chatArea.querySelectorAll(".message.user");
+                    if (userMsgs.length > 0) userMsgs[userMsgs.length - 1].remove();
+                    convUserCount = Math.max(0, convUserCount - 1);
+                }
+                if (!isPreset) {
+                    userInput.value = text;
+                    autoResize();
+                    if (images.length > 0) {
+                        pendingImages = images.slice();
+                    }
+                    if (docs.length > 0) {
+                        pendingDocs = docs.slice();
+                    }
+                    renderPreviews();
+                    userInput.focus();
+                }
+                showToast(errMsg, "error");
+                return;
+            }
             if (cursor.parentNode) cursor.remove();
             bubble.textContent = "";
             const errDiv = document.createElement("div");
@@ -1934,6 +2040,9 @@ async function sendMessage(presetText, opts) {
                     if (parsed.compress) {
                         showCompressNotice(parsed.compress.threshold_kb);
                     }
+                    if (parsed.ts) {
+                        streamMsgTs = parsed.ts;
+                    }
                 } catch {
                     fullText += data;
                     scheduleRender();
@@ -2008,7 +2117,7 @@ async function sendMessage(presetText, opts) {
             renderAskCard(bubble, askPayload.questions);
         } else {
             const aiMsgDiv = bubble.closest(".message");
-            attachAiActions(aiMsgDiv, fullText, { allowRegen: true });
+            attachAiActions(aiMsgDiv, fullText, { allowRegen: true, ts: streamMsgTs || Math.floor(Date.now() / 1000) });
         }
     }
     await loadConversations();
@@ -2023,6 +2132,7 @@ async function openSettings() {
     setAutoCompress.checked = !!cfg.auto_compress;
     setCompressThreshold.value = cfg.compress_threshold_kb || 8;
     updateCompressRow();
+    syncAppearanceControls();
     settingsOverlay.classList.add("active");
 }
 
@@ -2062,6 +2172,73 @@ async function saveSettings() {
         showToast("保存失败: " + err.message, "error");
     }
 }
+
+// ==================== 外观：主题 / 字号 ====================
+const THEME_KEY = "uiTheme";
+const FONT_SIZE_KEY = "chatFontSize";
+const FONT_SIZE_MIN = 8;
+const FONT_SIZE_MAX = 40;
+const FONT_SIZE_DEFAULT = 14;
+
+function applyTheme(theme) {
+    if (theme === "light") {
+        document.documentElement.setAttribute("data-theme", "light");
+    } else {
+        document.documentElement.removeAttribute("data-theme");
+    }
+}
+
+function getStoredTheme() {
+    return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+}
+
+function applyChatFontSize(px) {
+    let v = parseInt(px, 10);
+    if (isNaN(v)) v = FONT_SIZE_DEFAULT;
+    v = Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, v));
+    document.documentElement.style.setProperty("--chat-font-size", v + "px");
+    return v;
+}
+
+function getStoredFontSize() {
+    const v = parseInt(localStorage.getItem(FONT_SIZE_KEY), 10);
+    if (isNaN(v)) return FONT_SIZE_DEFAULT;
+    return Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, v));
+}
+
+function syncAppearanceControls() {
+    const themeChk = document.getElementById("set-light-theme");
+    if (themeChk) themeChk.checked = getStoredTheme() === "light";
+    const fontRange = document.getElementById("set-chat-font-size");
+    const fontVal = document.getElementById("chat-font-size-value");
+    const cur = getStoredFontSize();
+    if (fontRange) fontRange.value = cur;
+    if (fontVal) fontVal.textContent = cur + "px";
+}
+
+(function initAppearance() {
+    applyTheme(getStoredTheme());
+    applyChatFontSize(getStoredFontSize());
+
+    const themeChk = document.getElementById("set-light-theme");
+    if (themeChk) {
+        themeChk.addEventListener("change", () => {
+            const theme = themeChk.checked ? "light" : "dark";
+            localStorage.setItem(THEME_KEY, theme);
+            applyTheme(theme);
+        });
+    }
+    const fontRange = document.getElementById("set-chat-font-size");
+    const fontVal = document.getElementById("chat-font-size-value");
+    if (fontRange) {
+        fontRange.addEventListener("input", () => {
+            const v = applyChatFontSize(fontRange.value);
+            if (fontVal) fontVal.textContent = v + "px";
+            localStorage.setItem(FONT_SIZE_KEY, String(v));
+        });
+    }
+    syncAppearanceControls();
+})();
 
 // ==================== 工具函数 ====================
 function confirmDialog(message, opts) {
@@ -2302,11 +2479,27 @@ function enhanceCodeBlocks(bubble) {
     });
 }
 
+function formatMsgTime(tsSec) {
+    if (!tsSec) return "";
+    const d = new Date(tsSec * 1000);
+    if (isNaN(d.getTime())) return "";
+    const p = n => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+        " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+
 function attachAiActions(msgDiv, rawText, opts) {
     if (!msgDiv) return;
     opts = opts || {};
     const bubble = msgDiv.querySelector(".bubble");
-    if (bubble) enhanceCodeBlocks(bubble);
+    if (bubble) {
+        enhanceCodeBlocks(bubble);
+        renderMathInElement_safe(bubble);
+    }
+
+    if (typeof opts.ts !== "undefined" && opts.ts) {
+        msgDiv.dataset.ts = opts.ts;
+    }
 
     let actions = msgDiv.querySelector(".msg-actions");
     if (actions) actions.remove();
@@ -2339,6 +2532,16 @@ function attachAiActions(msgDiv, rawText, opts) {
     if (typeof rawText === "string") {
         msgDiv.dataset.rawText = rawText;
     }
+
+    const tsVal = msgDiv.dataset.ts ? parseInt(msgDiv.dataset.ts, 10) : 0;
+    const tsText = formatMsgTime(tsVal);
+    if (tsText) {
+        const tsEl = document.createElement("span");
+        tsEl.className = "msg-time";
+        tsEl.textContent = tsText;
+        actions.appendChild(tsEl);
+    }
+
     msgDiv.appendChild(actions);
 }
 

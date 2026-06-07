@@ -65,9 +65,12 @@ def _ask(prompt, default_yes=True):
 
 def _module_available(import_name):
     try:
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if IS_WINDOWS:
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
         subprocess.check_call(
             [sys.executable, "-c", f"import {import_name}"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **kwargs,
         )
         return True
     except Exception:
@@ -93,9 +96,12 @@ def _pip_install(pkgs):
 
 def _has_pip():
     try:
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if IS_WINDOWS:
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
         subprocess.check_call(
             [sys.executable, "-m", "pip", "--version"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **kwargs,
         )
         return True
     except Exception:
@@ -160,6 +166,7 @@ def _pid_alive(pid):
             out = subprocess.check_output(
                 ["tasklist", "/FI", f"PID eq {pid}"],
                 stderr=subprocess.DEVNULL,
+                creationflags=0x08000000,
             ).decode("utf-8", "ignore").lower()
             return "python" in out
         except Exception:
@@ -188,16 +195,19 @@ def _free_port():
     if IS_WINDOWS:
         try:
             out = subprocess.check_output(
-                f'netstat -ano | findstr ":{PORT} " | findstr LISTENING',
+                f'netstat -ano | findstr ":{PORT} "',
                 shell=True, stderr=subprocess.DEVNULL,
+                creationflags=0x08000000,
             ).decode("utf-8", "ignore")
             for line in out.splitlines():
-                parts = line.split()
-                if parts:
-                    pid = parts[-1]
-                    _print(f"⚠️  端口 {PORT} 被占用 (PID: {pid})，正在释放...")
-                    subprocess.call(["taskkill", "/PID", pid, "/F"],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if "LISTENING" in line.upper() or "ESTABLISHED" in line.upper():
+                    parts = line.split()
+                    if parts:
+                        pid = parts[-1]
+                        _print(f"⚠️  端口 {PORT} 被占用 (PID: {pid})，正在释放...")
+                        subprocess.call(["taskkill", "/PID", pid, "/F"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        creationflags=0x08000000)
         except Exception:
             pass
     else:
@@ -243,9 +253,17 @@ def do_start():
     child_env = dict(os.environ)
     child_env["PYTHONUNBUFFERED"] = "1"  # 后台 app.py 日志实时写入，避免被缓冲
     child_env["PYTHONIOENCODING"] = "utf-8"
-    kwargs = {"cwd": WEB_DIR, "stdout": logf, "stderr": subprocess.STDOUT, "env": child_env}
+    kwargs = {
+        "cwd": WEB_DIR,
+        "stdout": logf,
+        "stderr": subprocess.STDOUT,
+        "stdin": subprocess.DEVNULL,  # 关键：关闭 stdin 防止后台子进程因读取失败而退出
+        "env": child_env,
+    }
     if IS_WINDOWS:
-        kwargs["creationflags"] = 0x00000008  # DETACHED_PROCESS
+        kwargs["creationflags"] = (
+            0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+        )
     else:
         kwargs["start_new_session"] = True
 
@@ -288,7 +306,8 @@ def do_stop():
     _print(f"⏳ 正在关闭 PolyAI Chat (PID: {pid})...")
     if IS_WINDOWS:
         subprocess.call(["taskkill", "/PID", str(pid), "/F"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=0x08000000)
     else:
         try:
             os.kill(pid, 15)
@@ -387,4 +406,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        _print(f"❌ 未预期的错误: {e}")
+        if IS_WINDOWS:
+            try:
+                input("按回车键退出...")
+            except Exception:
+                pass
+        sys.exit(1)

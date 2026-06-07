@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Chat</title>
     <link rel="stylesheet" href="/static/highlight-theme.min.css?v={{ cache_version }}">
+    <link rel="stylesheet" href="/static/katex.min.css?v={{ cache_version }}">
     <link rel="stylesheet" href="/static/style.css?v={{ cache_version }}">
 </head>
 <body>
@@ -151,6 +152,24 @@
                 <button class="btn-close-settings" id="btn-close-settings">✕</button>
             </div>
             <div class="settings-body">
+                <div class="setting-group">
+                    <div class="setting-row">
+                        <label class="setting-label">浅色主题</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="set-light-theme">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-hint">开启后切换为浅色界面（默认深色），选择会被记住</div>
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">聊天字号</label>
+                    <div class="setting-hint">调节聊天气泡文字大小，范围 8-40px</div>
+                    <div class="setting-row" style="gap:12px;">
+                        <input type="range" id="set-chat-font-size" min="8" max="40" step="1" value="14" style="flex:1;">
+                        <span id="chat-font-size-value" style="min-width:42px;text-align:right;color:var(--text-secondary);">14px</span>
+                    </div>
+                </div>
                 <div class="setting-group">
                     <label class="setting-label">上下文轮数限制</label>
                     <div class="setting-hint">0 = 不限制，建议 20-50</div>
@@ -332,6 +351,8 @@
     </div>
     <script src="/static/highlight.min.js?v={{ cache_version }}"></script>
     <script src="/static/marked.min.js?v={{ cache_version }}"></script>
+    <script src="/static/katex.min.js?v={{ cache_version }}"></script>
+    <script src="/static/katex-auto-render.min.js?v={{ cache_version }}"></script>
     <script src="/static/app.js?v={{ cache_version }}"></script>
 </body>
 </html>
