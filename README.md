@@ -11,6 +11,8 @@
 python3 start.py
 ```
 
+> Windows 如果无法正常启动，请使用 `python -u start.py`
+
 ## 命令列表
 
 | 命令 | 说明 |

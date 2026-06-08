@@ -1,4 +1,6 @@
 import sys
+import os
+import atexit
 import threading
 import time
 import termios
@@ -12,6 +14,34 @@ abort_flag = False
 listener_stop = threading.Event()
 _old_termios_global = None
 _listener_global = None
+
+_initial_termios = None
+
+
+def _save_initial_termios():
+    global _initial_termios
+    try:
+        fd = sys.stdin.fileno()
+        _initial_termios = termios.tcgetattr(fd)
+    except Exception:
+        pass
+
+
+def _restore_terminal():
+    try:
+        sys.stdout.write("\033[0m")
+        sys.stdout.flush()
+    except Exception:
+        pass
+    if _initial_termios:
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _initial_termios)
+        except Exception:
+            pass
+
+
+_save_initial_termios()
+atexit.register(_restore_terminal)
 
 
 def _key_listener():
