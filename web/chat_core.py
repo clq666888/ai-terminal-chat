@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 
 
@@ -116,12 +117,18 @@ def parse_stream_chunk_full(line):
 
 def _normalize_base_url(base_url):
     url = base_url.rstrip("/")
-    if not url.endswith("/chat/completions"):
-        url += "/chat/completions"
-    return url
+    if url.endswith("/chat/completions"):
+        return url
+    # 已带版本段（如 /v1、/v1beta、/v1beta/openai、/v3）的只补端点，避免重复加 /v1
+    if re.search(r"/v\d+\w*(/[\w-]+)?$", url):
+        return url + "/chat/completions"
+    # 仅域名（无版本段）时按 OpenAI 规范补全 /v1/chat/completions
+    return url + "/v1/chat/completions"
 
 
 def send_chat_request(base_url, api_key, messages, model, temperature=0.7):
     url = _normalize_base_url(base_url)
     headers, payload = build_request_payload(api_key, messages, model, temperature, stream=True)
-    return requests.post(url, json=payload, headers=headers, stream=True, timeout=(10, 30))
+    resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=(10, 30))
+    resp.encoding = "utf-8"
+    return resp

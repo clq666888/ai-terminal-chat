@@ -3,6 +3,19 @@ const userInput = document.getElementById("user-input");
 const btnSend = document.getElementById("btn-send");
 const btnStop = document.getElementById("btn-stop");
 const btnNewChat = document.getElementById("btn-new-chat");
+const btnNewProject = document.getElementById("btn-new-project");
+const projectOverlay = document.getElementById("project-overlay");
+const projectPanelTitle = document.getElementById("project-panel-title");
+const btnCloseProject = document.getElementById("btn-close-project");
+const btnSaveProject = document.getElementById("btn-save-project");
+const projectName = document.getElementById("project-name");
+const projectPrompt = document.getElementById("project-prompt");
+const projectProvider = document.getElementById("project-provider");
+const projectModel = document.getElementById("project-model");
+const projectKbGroup = document.getElementById("project-kb-group");
+const projectKbList = document.getElementById("project-kb-list");
+const btnKbUpload = document.getElementById("btn-kb-upload");
+const projectKbFile = document.getElementById("project-kb-file");
 const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
 const sidebar = document.getElementById("sidebar");
 const convList = document.getElementById("conv-list");
@@ -57,6 +70,12 @@ const agentName = document.getElementById("agent-name");
 const agentPrompt = document.getElementById("agent-prompt");
 const agentProvider = document.getElementById("agent-provider");
 const agentModel = document.getElementById("agent-model");
+const agentCustomToggle = document.getElementById("agent-custom-toggle");
+const agentSavedModel = document.getElementById("agent-saved-model");
+const agentSavedModelWrap = document.getElementById("agent-saved-model-wrap");
+const agentCustomWrap = document.getElementById("agent-custom-wrap");
+const agentBaseUrl = document.getElementById("agent-base-url");
+const agentApiKey = document.getElementById("agent-api-key");
 const btnAgentCancel = document.getElementById("btn-agent-cancel");
 const btnAgentSave = document.getElementById("btn-agent-save");
 const agentFormActions = document.getElementById("agent-form-actions");
@@ -82,6 +101,7 @@ if (btnWebsearch) {
 let isGenerating = false;
 let currentAbort = null;
 let currentConvId = null;
+let generatingConvId = null;
 let welcomeHTML = welcome ? welcome.outerHTML : "";
 let providers = {};
 let currentAgentId = null;
@@ -136,7 +156,18 @@ const CARD_AVATAR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentCol
 const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg>';
 
 btnToggleSidebar.addEventListener("click", () => sidebar.classList.toggle("collapsed"));
-btnNewChat.addEventListener("click", createNewConversation);
+btnNewChat.addEventListener("click", () => createNewConversation());
+if (btnNewProject) btnNewProject.addEventListener("click", () => openProjectModal(null));
+if (btnCloseProject) btnCloseProject.addEventListener("click", closeProjectModal);
+if (btnSaveProject) btnSaveProject.addEventListener("click", saveProject);
+if (projectOverlay) projectOverlay.addEventListener("click", e => { if (e.target === projectOverlay) closeProjectModal(); });
+if (btnKbUpload) btnKbUpload.addEventListener("click", () => { if (!btnKbUpload.disabled) projectKbFile.click(); });
+if (projectKbFile) projectKbFile.addEventListener("change", async () => {
+    if (projectKbFile.files && projectKbFile.files.length) {
+        await uploadKbFiles(Array.from(projectKbFile.files));
+        projectKbFile.value = "";
+    }
+});
 const convSearchInput = document.getElementById("conv-search-input");
 if (convSearchInput) {
     convSearchInput.addEventListener("input", () => {
@@ -322,8 +353,22 @@ function readImageFile(file) {
     }
     const reader = new FileReader();
     reader.onload = () => {
-        pendingImages.push({ name: file.name, base64: reader.result });
-        renderPreviews();
+        const img = new Image();
+        img.onload = () => {
+            const MAX = 800;
+            let w = img.width, h = img.height;
+            if (w > MAX || h > MAX) {
+                if (w >= h) { h = Math.round(h * MAX / w); w = MAX; }
+                else { w = Math.round(w * MAX / h); h = MAX; }
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = w; canvas.height = h;
+            canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+            const compressed = canvas.toDataURL("image/jpeg", 0.80);
+            pendingImages.push({ name: file.name, base64: compressed });
+            renderPreviews();
+        };
+        img.src = reader.result;
     };
     reader.readAsDataURL(file);
 }
@@ -500,6 +545,7 @@ async function selectAgent(agentId) {
     }
 
     updateSelectorButton();
+    await syncQuickModelToAgent();
 
     const agent = cachedAgents.find(a => a.id === agentId);
     showToast("已切换到: " + (agent ? agent.name : "通用助手"), "success");
@@ -512,6 +558,7 @@ async function loadAgentBar() {
     const cur = curResp.ok ? await curResp.json() : {};
     currentAgentId = cur.agent_id || null;
     updateSelectorButton();
+    await syncQuickModelToAgent();
 }
 
 // ==================== 智能体管理面板 ====================
@@ -593,39 +640,77 @@ async function showAgentForm(agent) {
         agentAvatarPreview.innerHTML = DEFAULT_AVATAR_SVG;
     }
 
-    agentProvider.innerHTML = '<option value="">使用全局模型</option>';
+    agentProvider.innerHTML = "";
     for (const [key, val] of providerEntriesCustomFirst()) {
         const opt = document.createElement("option");
         opt.value = key;
         opt.textContent = val.name;
         agentProvider.appendChild(opt);
     }
-    agentProvider.value = agent ? (agent.provider || "") : "";
-    onAgentProviderChange();
-    if (agent && agent.model) {
-        agentModel.value = agent.model;
+
+    await buildAgentSavedModelList(agent);
+
+    const savedKey = agentSavedModel.value;
+    const isCustom = !!(agent && agent.model) && savedKey === "";
+    agentCustomToggle.checked = isCustom;
+    if (isCustom) {
+        agentProvider.value = agent.provider || agentProvider.value;
+        agentBaseUrl.value = agent.base_url || "";
+        agentApiKey.value = "";
+        agentModel.value = agent.model || "";
+    } else {
+        agentProvider.value = agentProvider.options.length ? agentProvider.options[0].value : "";
+        agentBaseUrl.value = "";
+        agentApiKey.value = "";
+        agentModel.value = "";
     }
+    applyAgentModelMode();
 
     agentCallable.checked = agent ? !!agent.callable : false;
     callableFields.style.display = agentCallable.checked ? "block" : "none";
     agentSlug.value = agent ? (agent.slug || "") : "";
     agentWhenToCall.value = agent ? (agent.when_to_call || "") : "";
 
+    agentCustomToggle.onchange = applyAgentModelMode;
     agentProvider.onchange = onAgentProviderChange;
+}
+
+async function buildAgentSavedModelList(agent) {
+    let customModels = [];
+    try {
+        const resp = await fetch("/api/custom-models");
+        if (resp.ok) customModels = await resp.json();
+    } catch (e) {}
+    agentSavedModel.innerHTML = '<option value="">跟随当前模型</option>';
+    customModels.forEach(m => {
+        const key = m.provider + "|" + m.model;
+        const opt = document.createElement("option");
+        opt.value = key;
+        opt.dataset.baseUrl = m.base_url || "";
+        opt.textContent = m.name || m.model;
+        agentSavedModel.appendChild(opt);
+    });
+    if (agent && agent.model) {
+        const wantKey = (agent.provider || "") + "|" + agent.model;
+        const match = Array.from(agentSavedModel.options).find(o => o.value === wantKey);
+        agentSavedModel.value = match ? wantKey : "";
+    } else {
+        agentSavedModel.value = "";
+    }
+}
+
+function applyAgentModelMode() {
+    const custom = agentCustomToggle.checked;
+    agentCustomWrap.style.display = custom ? "block" : "none";
+    agentSavedModelWrap.style.display = custom ? "none" : "block";
+    if (custom) onAgentProviderChange();
 }
 
 function onAgentProviderChange() {
     const key = agentProvider.value;
-    agentModel.innerHTML = '<option value="">使用全局模型</option>';
-    if (!key) return;
     const p = providers[key];
-    if (p && p.models) {
-        p.models.forEach(m => {
-            const opt = document.createElement("option");
-            opt.value = m;
-            opt.textContent = m;
-            agentModel.appendChild(opt);
-        });
+    if (p && p.base_url && !agentBaseUrl.value.trim()) {
+        agentBaseUrl.value = p.base_url;
     }
 }
 
@@ -665,17 +750,60 @@ async function saveAgent() {
         name: name,
         avatar: agentAvatarUrl,
         system_prompt: agentPrompt.value,
-        provider: agentProvider.value,
-        model: agentModel.value,
+        provider: "",
+        model: "",
         base_url: "",
         callable: callable,
         slug: slug,
         when_to_call: whenToCall
     };
 
-    if (payload.provider) {
-        const p = providers[payload.provider];
-        if (p) payload.base_url = p.base_url || "";
+    if (agentCustomToggle.checked) {
+        const cProvider = agentProvider.value;
+        const cModel = agentModel.value.trim();
+        const cBaseUrl = agentBaseUrl.value.trim();
+        const cKey = agentApiKey.value.trim();
+        if (!cModel) { showToast("请填写模型名称", "error"); return; }
+        if (!cBaseUrl) { showToast("请填写 API 地址", "error"); return; }
+        const p = providers[cProvider];
+        const providerName = p ? p.name : cProvider;
+        const regBody = { provider: cProvider, model: cModel, base_url: cBaseUrl, name: providerName + " / " + cModel };
+        if (cKey) regBody.api_key = cKey;
+        try {
+            const regResp = await fetch("/api/custom-models", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(regBody)
+            });
+            if (!regResp.ok && regResp.status !== 409) {
+                const err = await regResp.json();
+                showToast(err.error || "保存模型失败", "error");
+                return;
+            }
+            if (cKey && regResp.status === 409) {
+                await fetch("/api/settings", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ provider: cProvider, api_key: cKey })
+                });
+            }
+        } catch (e) {
+            showToast("保存模型失败: " + e.message, "error");
+            return;
+        }
+        await buildQuickModelList();
+        payload.provider = cProvider;
+        payload.model = cModel;
+        payload.base_url = cBaseUrl;
+    } else {
+        const val = agentSavedModel.value;
+        if (val) {
+            const [sProvider, sModel] = val.split("|", 2);
+            const selOpt = agentSavedModel.selectedOptions[0];
+            payload.provider = sProvider;
+            payload.model = sModel;
+            payload.base_url = selOpt && selOpt.dataset.baseUrl ? selOpt.dataset.baseUrl : "";
+        }
     }
 
     try {
@@ -739,9 +867,12 @@ async function buildQuickModelList() {
         if (key === activeKey) opt.selected = true;
         quickModel.appendChild(opt);
     });
+
+    await syncQuickModelToAgent();
 }
 
 async function onQuickModelChange() {
+    if (quickModel.disabled) return;
     const val = quickModel.value;
     if (!val) return;
     const [provider, model] = val.split("|", 2);
@@ -758,6 +889,40 @@ async function onQuickModelChange() {
         if (resp.ok) showToast("已切换到 " + model, "success");
     } catch (err) {
         showToast("切换失败", "error");
+    }
+}
+
+async function syncQuickModelToAgent() {
+    const agent = currentAgentId ? cachedAgents.find(a => a.id === currentAgentId) : null;
+    const locked = !!(agent && agent.model);
+    if (locked) {
+        const wantKey = (agent.provider || "") + "|" + agent.model;
+        let opt = Array.from(quickModel.options).find(o => o.value === wantKey);
+        if (!opt) {
+            opt = document.createElement("option");
+            opt.value = wantKey;
+            opt.dataset.baseUrl = agent.base_url || "";
+            opt.dataset.agentTemp = "1";
+            opt.textContent = agent.model;
+            quickModel.appendChild(opt);
+        }
+        quickModel.value = wantKey;
+        quickModel.disabled = true;
+        quickModel.title = "当前模型已由智能体「" + agent.name + "」指定，不可修改";
+        try {
+            const body = { provider: agent.provider || "", model: agent.model };
+            const baseUrl = opt.dataset.baseUrl || agent.base_url || "";
+            if (baseUrl) body.base_url = baseUrl;
+            await fetch("/api/model", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+        } catch (e) {}
+    } else {
+        quickModel.disabled = false;
+        quickModel.title = "";
+        Array.from(quickModel.options).filter(o => o.dataset.agentTemp === "1").forEach(o => o.remove());
     }
 }
 
@@ -960,13 +1125,20 @@ async function saveApiConfig() {
 
 // ==================== 对话管理 ====================
 let convCache = [];
+let projectsCache = [];
+let editingProjectId = null;
+let expandedProjects = {};
 let convSearchKeyword = "";
 
 const CONV_MENU_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg>';
 
 async function loadConversations() {
-    const resp = await fetch("/api/conversations");
-    const list = await resp.json();
+    const [convResp, projResp] = await Promise.all([
+        fetch("/api/conversations"),
+        fetch("/api/projects")
+    ]);
+    const list = await convResp.json();
+    projectsCache = projResp.ok ? await projResp.json() : [];
     convCache = list;
     renderConvList(list);
 }
@@ -985,16 +1157,27 @@ function buildConvItem(c) {
     const item = document.createElement("div");
     item.className = "conv-item" + (c.id === currentConvId ? " active" : "");
     item.dataset.id = c.id;
+    const inProject = !!(c.project_id && projectsCache.some(p => p.id === c.project_id));
+    let menuHtml =
+        '<button class="conv-menu-item" data-act="rename">重命名</button>' +
+        '<button class="conv-menu-item" data-act="share">分享</button>';
+    if (!inProject) {
+        menuHtml += '<button class="conv-menu-item" data-act="pin">' + (c.pinned ? "取消置顶" : "置顶") + '</button>';
+    }
+    menuHtml +=
+        '<div class="conv-menu-sub-wrap">' +
+        '<button class="conv-menu-item has-submenu" data-act="move">移动<span class="submenu-arrow">\u203A</span></button>' +
+        '<div class="conv-submenu"></div>' +
+        '</div>';
+    if (inProject) {
+        menuHtml += '<button class="conv-menu-item" data-act="moveout">移出项目</button>';
+    }
+    menuHtml += '<button class="conv-menu-item danger" data-act="delete">删除</button>';
     item.innerHTML =
         '<span class="conv-item-icon">💬</span>' +
         '<span class="conv-item-title">' + escapeHtml(c.title) + '</span>' +
         '<button class="conv-item-more" title="更多">' + CONV_MENU_SVG + '</button>' +
-        '<div class="conv-menu">' +
-        '<button class="conv-menu-item" data-act="rename">重命名</button>' +
-        '<button class="conv-menu-item" data-act="share">分享</button>' +
-        '<button class="conv-menu-item" data-act="pin">' + (c.pinned ? "取消置顶" : "置顶") + '</button>' +
-        '<button class="conv-menu-item danger" data-act="delete">删除</button>' +
-        '</div>';
+        '<div class="conv-menu">' + menuHtml + '</div>';
     item.addEventListener("click", e => {
         if (e.target.closest(".conv-item-more") || e.target.closest(".conv-menu")) return;
         switchConversation(c.id);
@@ -1006,6 +1189,7 @@ function buildConvItem(c) {
         const wasOpen = menu.classList.contains("open");
         closeConvMenus();
         if (!wasOpen) {
+            fillMoveSubmenu(menu, c);
             menu.classList.add("open");
             const btnRect = moreBtn.getBoundingClientRect();
             menu.style.visibility = "hidden";
@@ -1028,15 +1212,349 @@ function buildConvItem(c) {
     menu.querySelectorAll(".conv-menu-item").forEach(btn => {
         btn.addEventListener("click", async e => {
             e.stopPropagation();
+            if (btn.dataset.act === "move") return;
             closeConvMenus();
             const act = btn.dataset.act;
             if (act === "rename") await renameConversation(c);
             else if (act === "share") await shareConversation(c);
             else if (act === "pin") await togglePinConversation(c);
+            else if (act === "moveout") await moveConversationTo(c, "");
             else if (act === "delete") await deleteConversation(c.id);
         });
     });
     return item;
+}
+
+function renderProjects(groupedConvs, kw) {
+    if (projectsCache.length === 0) return;
+    const byProject = {};
+    groupedConvs.forEach(c => {
+        (byProject[c.project_id] = byProject[c.project_id] || []).push(c);
+    });
+    projectsCache.forEach(p => {
+        const items = (byProject[p.id] || []).slice()
+            .sort((a, b) => (b.updated || 0) - (a.updated || 0));
+        if (kw && items.length === 0) return;
+        const expanded = expandedProjects[p.id] !== false;
+
+        const group = document.createElement("div");
+        group.className = "project-group";
+
+        const head = document.createElement("div");
+        head.className = "project-head";
+        head.innerHTML =
+            '<span class="project-caret' + (expanded ? " open" : "") + '">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polyline points="9 18 15 12 9 6"></polyline></svg>' +
+            '</span>' +
+            '<span class="project-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></span>' +
+            '<span class="project-name" title="' + escapeHtml(p.name) + '">' + escapeHtml(p.name) + '</span>' +
+            '<button class="project-add" title="在此项目新建对话"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button>' +
+            '<button class="conv-item-more project-more" title="更多">' + CONV_MENU_SVG + '</button>' +
+            '<div class="conv-menu">' +
+            '<button class="conv-menu-item" data-act="edit">编辑项目</button>' +
+            '<button class="conv-menu-item danger" data-act="delete">删除项目</button>' +
+            '</div>';
+
+        head.addEventListener("click", e => {
+            if (e.target.closest(".project-add") || e.target.closest(".project-more") || e.target.closest(".conv-menu")) return;
+            expandedProjects[p.id] = !expanded;
+            renderConvList(convCache);
+        });
+        head.querySelector(".project-add").addEventListener("click", e => {
+            e.stopPropagation();
+            createNewConversation(p.id);
+        });
+        const moreBtn = head.querySelector(".project-more");
+        const menu = head.querySelector(".conv-menu");
+        moreBtn.addEventListener("click", e => {
+            e.stopPropagation();
+            const wasOpen = menu.classList.contains("open");
+            closeConvMenus();
+            if (!wasOpen) {
+                menu.classList.add("open");
+                const btnRect = moreBtn.getBoundingClientRect();
+                menu.style.visibility = "hidden";
+                const menuRect = menu.getBoundingClientRect();
+                let left = btnRect.right + 6;
+                let top = btnRect.top;
+                if (left + menuRect.width > window.innerWidth - 8) left = btnRect.left - menuRect.width - 6;
+                if (top + menuRect.height > window.innerHeight - 8) top = window.innerHeight - menuRect.height - 8;
+                if (top < 8) top = 8;
+                if (left < 8) left = 8;
+                menu.style.left = left + "px";
+                menu.style.top = top + "px";
+                menu.style.visibility = "";
+            }
+        });
+        menu.querySelectorAll(".conv-menu-item").forEach(btn => {
+            btn.addEventListener("click", async e => {
+                e.stopPropagation();
+                closeConvMenus();
+                const act = btn.dataset.act;
+                if (act === "edit") openProjectModal(p);
+                else if (act === "delete") await deleteProject(p);
+            });
+        });
+        group.appendChild(head);
+
+        if (expanded) {
+            const body = document.createElement("div");
+            body.className = "project-body";
+            if (items.length === 0) {
+                const hint = document.createElement("div");
+                hint.className = "project-empty-hint";
+                hint.textContent = "暂无对话";
+                body.appendChild(hint);
+            } else {
+                items.forEach(c => body.appendChild(buildConvItem(c)));
+            }
+            group.appendChild(body);
+        }
+        convList.appendChild(group);
+    });
+}
+
+function openProjectModal(project) {
+    editingProjectId = project ? project.id : null;
+    projectPanelTitle.textContent = project ? "编辑项目" : "新建项目";
+    projectName.value = project ? (project.name || "") : "";
+    projectPrompt.value = project ? (project.system_prompt || "") : "";
+
+    projectProvider.innerHTML = '<option value="">使用全局模型</option>';
+    for (const [key, val] of providerEntriesCustomFirst()) {
+        const opt = document.createElement("option");
+        opt.value = key;
+        opt.textContent = val.name;
+        projectProvider.appendChild(opt);
+    }
+    projectProvider.value = project ? (project.provider || "") : "";
+    onProjectProviderChange();
+    if (project && project.model) projectModel.value = project.model;
+    projectProvider.onchange = onProjectProviderChange;
+
+    renderProjectKb(project);
+    projectOverlay.classList.add("active");
+    projectName.focus();
+}
+
+function closeProjectModal() {
+    projectOverlay.classList.remove("active");
+    editingProjectId = null;
+}
+
+function onProjectProviderChange() {
+    const key = projectProvider.value;
+    projectModel.innerHTML = '<option value="">使用全局模型</option>';
+    if (!key) return;
+    const p = providers[key];
+    if (p && p.models) {
+        p.models.forEach(m => {
+            const opt = document.createElement("option");
+            opt.value = m;
+            opt.textContent = m;
+            projectModel.appendChild(opt);
+        });
+    }
+}
+
+async function saveProject() {
+    const name = projectName.value.trim();
+    if (!name) { showToast("请输入项目名称", "error"); return; }
+    const payload = {
+        name: name,
+        system_prompt: projectPrompt.value,
+        provider: projectProvider.value,
+        model: projectModel.value,
+        base_url: ""
+    };
+    if (payload.provider) {
+        const p = providers[payload.provider];
+        if (p) payload.base_url = p.base_url || "";
+    }
+    try {
+        let resp;
+        if (editingProjectId) {
+            resp = await fetch("/api/projects/" + editingProjectId, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+        } else {
+            resp = await fetch("/api/projects", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+        }
+        if (resp.ok) {
+            const saved = await resp.json().catch(() => ({}));
+            const wasNew = !editingProjectId;
+            showToast(wasNew ? "项目已创建" : "项目已更新", "success");
+            await loadConversations();
+            if (wasNew && saved && saved.id) {
+                editingProjectId = saved.id;
+                await renderProjectKb(saved);
+                btnKbUpload.disabled = false;
+                return;
+            }
+            closeProjectModal();
+        } else {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.error || "保存失败", "error");
+        }
+    } catch (e) {
+        showToast("保存失败", "error");
+    }
+}
+
+async function deleteProject(p) {
+    const ok = await confirmDialog("删除项目「" + (p.name || "") + "」？项目内的对话不会被删除，会移到未分组。", {
+        title: "删除项目",
+        icon: "\u{1F5D1}\uFE0F",
+        okText: "删除"
+    });
+    if (!ok) return;
+    const resp = await fetch("/api/projects/" + p.id, { method: "DELETE" });
+    if (resp.ok) {
+        showToast("项目已删除", "success");
+        await loadConversations();
+    } else {
+        showToast("删除失败", "error");
+    }
+}
+
+function formatKbSize(bytes) {
+    if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return bytes + " B";
+}
+
+function renderKbItems(files) {
+    projectKbList.innerHTML = "";
+    if (!files || files.length === 0) {
+        const hint = document.createElement("div");
+        hint.className = "project-kb-empty";
+        hint.textContent = "还没有文件";
+        projectKbList.appendChild(hint);
+        return;
+    }
+    files.forEach(f => {
+        const row = document.createElement("div");
+        row.className = "project-kb-item";
+        row.innerHTML =
+            '<span class="kb-item-name" title="' + escapeHtml(f.name) + '">' + escapeHtml(f.name) + '</span>' +
+            '<span class="kb-item-size">' + formatKbSize(f.size || 0) + '</span>' +
+            '<button class="kb-item-del" title="删除">✕</button>';
+        row.querySelector(".kb-item-del").addEventListener("click", () => deleteKbFile(f));
+        projectKbList.appendChild(row);
+    });
+}
+
+async function renderProjectKb(project) {
+    if (!project || !project.id) {
+        projectKbList.innerHTML = "";
+        const hint = document.createElement("div");
+        hint.className = "project-kb-empty";
+        hint.textContent = "保存项目后即可上传文件";
+        projectKbList.appendChild(hint);
+        btnKbUpload.disabled = true;
+        return;
+    }
+    btnKbUpload.disabled = false;
+    try {
+        const resp = await fetch("/api/projects/" + project.id + "/files");
+        const files = resp.ok ? await resp.json() : [];
+        renderKbItems(files);
+    } catch (e) {
+        renderKbItems([]);
+    }
+}
+
+function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(file, "utf-8");
+    });
+}
+
+async function uploadKbFiles(fileList) {
+    if (!editingProjectId) { showToast("请先保存项目", "error"); return; }
+    let okCount = 0;
+    for (const file of fileList) {
+        try {
+            const content = await readFileAsText(file);
+            const resp = await fetch("/api/projects/" + editingProjectId + "/files", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: file.name, content: content })
+            });
+            if (resp.ok) { okCount++; }
+            else {
+                const err = await resp.json().catch(() => ({}));
+                showToast((file.name || "文件") + "：" + (err.error || "上传失败"), "error");
+            }
+        } catch (e) {
+            showToast((file.name || "文件") + "：读取失败", "error");
+        }
+    }
+    if (okCount > 0) showToast("已上传 " + okCount + " 个文件", "success");
+    const proj = projectsCache.find(p => p.id === editingProjectId) || { id: editingProjectId };
+    await renderProjectKb(proj);
+}
+
+async function deleteKbFile(f) {
+    if (!editingProjectId) return;
+    const ok = await confirmDialog("删除文件「" + (f.name || "") + "」？", { title: "删除文件", okText: "删除" });
+    if (!ok) return;
+    const resp = await fetch("/api/projects/" + editingProjectId + "/files/" + f.id, { method: "DELETE" });
+    if (resp.ok) {
+        showToast("文件已删除", "success");
+        const proj = projectsCache.find(p => p.id === editingProjectId) || { id: editingProjectId };
+        await renderProjectKb(proj);
+    } else {
+        showToast("删除失败", "error");
+    }
+}
+
+async function moveConversationTo(c, projectId) {
+    const resp = await fetch("/api/conversations/" + c.id + "/project", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId || null })
+    });
+    if (resp.ok) {
+        if (projectId) expandedProjects[projectId] = true;
+        await loadConversations();
+    } else {
+        showToast("移动失败", "error");
+    }
+}
+
+function fillMoveSubmenu(menu, c) {
+    const sub = menu.querySelector(".conv-submenu");
+    if (!sub) return;
+    sub.innerHTML = "";
+    if (projectsCache.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "conv-submenu-empty";
+        empty.textContent = "暂无项目";
+        sub.appendChild(empty);
+        return;
+    }
+    projectsCache.forEach(p => {
+        const b = document.createElement("button");
+        b.className = "conv-menu-item";
+        if (c.project_id === p.id) b.style.fontWeight = "600";
+        b.textContent = p.name;
+        b.addEventListener("click", async e => {
+            e.stopPropagation();
+            closeConvMenus();
+            await moveConversationTo(c, p.id);
+        });
+        sub.appendChild(b);
+    });
 }
 
 function renderConvList(list) {
@@ -1045,16 +1563,23 @@ function renderConvList(list) {
     let filtered = list;
     if (kw) filtered = list.filter(c => (c.title || "").toLowerCase().includes(kw));
 
-    const pinned = filtered.filter(c => c.pinned);
-    const normal = filtered.filter(c => !c.pinned);
+    const projIds = {};
+    projectsCache.forEach(p => { projIds[p.id] = true; });
+    const grouped = filtered.filter(c => c.project_id && projIds[c.project_id]);
+    const ungrouped = filtered.filter(c => !(c.project_id && projIds[c.project_id]));
 
-    if (filtered.length === 0) {
+    renderProjects(grouped, kw);
+
+    if (filtered.length === 0 && projectsCache.length === 0) {
         const empty = document.createElement("div");
         empty.className = "conv-empty-hint";
         empty.textContent = kw ? "没有匹配的对话" : "还没有对话";
         convList.appendChild(empty);
         return;
     }
+
+    const pinned = ungrouped.filter(c => c.pinned);
+    const normal = ungrouped.filter(c => !c.pinned);
 
     const appendSection = (label, items) => {
         if (items.length === 0) return;
@@ -1124,14 +1649,28 @@ async function togglePinConversation(c) {
     await loadConversations();
 }
 
-async function createNewConversation() {
+async function createNewConversation(projectId) {
+    // 当前有对话在后台生成时，切到新对话只断开本地观察流并复位按钮，
+    // 后端那一路继续跑完并写入历史，避免空白新对话残留“中断”按钮。
+    if (isGenerating && currentAbort) {
+        try { currentAbort.abort(); } catch (e) {}
+        currentAbort = null;
+        isGenerating = false;
+        generatingConvId = null;
+        btnSend.style.display = "";
+        btnStop.style.display = "none";
+        btnSend.disabled = false;
+    }
+    const body = { agent_id: currentAgentId };
+    if (projectId) body.project_id = projectId;
     const resp = await fetch("/api/conversations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent_id: currentAgentId })
+        body: JSON.stringify(body)
     });
     const conv = await resp.json();
     currentConvId = conv.id;
+    if (projectId) expandedProjects[projectId] = true;
     await loadConversations();
     showWelcome();
     headerTitle.textContent = conv.title;
@@ -1140,7 +1679,18 @@ async function createNewConversation() {
 
 async function switchConversation(cid) {
     if (cid === currentConvId && !isGenerating) return;
-    if (isGenerating) stopGeneration();
+    // 切走时：不中断后端生成，只断开本地这一路观察（后端会继续跑完并写入历史）
+    if (isGenerating) {
+        if (currentAbort) {
+            try { currentAbort.abort(); } catch (e) {}
+            currentAbort = null;
+        }
+        isGenerating = false;
+        generatingConvId = null;
+        btnSend.style.display = "";
+        btnStop.style.display = "none";
+        btnSend.disabled = false;
+    }
     currentConvId = cid;
     isBatchRendering = true;
     document.querySelectorAll(".conv-item").forEach(el => {
@@ -1149,6 +1699,7 @@ async function switchConversation(cid) {
     const resp = await fetch("/api/conversations/" + cid + "/messages");
     const msgs = await resp.json();
     chatArea.innerHTML = "";
+    if (typeof clearChatSearch === "function") clearChatSearch();
     if (msgs.length === 0) { showWelcome(); }
     else {
         let lastAiBubble = null;
@@ -1213,10 +1764,277 @@ async function switchConversation(cid) {
             body: JSON.stringify({ agent_id: currentAgentId })
         });
         updateSelectorButton();
+        await syncQuickModelToAgent();
+    }
+
+    // 进入任意对话时，主动询问后端该对话是否仍在后台生成。
+    // 这样不仅切对话能续接，刷新页面（JS 状态全丢、generatingConvId 归零）后
+    // 重新进入该对话也能接回后台仍在运行的流。
+    try {
+        const act = await fetch("/api/chat/active/" + cid);
+        const aj = act.ok ? await act.json() : { active: false };
+        if (aj.active && aj.is_image) {
+            pollImageGeneration(cid);
+        } else if (aj.active) {
+            attachToActiveStream(cid);
+        } else if (generatingConvId === cid) {
+            generatingConvId = null;
+        }
+    } catch (e) {
+        if (generatingConvId === cid) generatingConvId = null;
     }
 }
 
+async function pollImageGeneration(cid) {
+    generatingConvId = cid;
+    isGenerating = true;
+    btnSend.style.display = "none";
+    btnStop.style.display = "";
+    let made = addAiBubble();
+    let bubble = made.bubble;
+    if (made.cursor && made.cursor.parentNode) made.cursor.remove();
+    showImageLoading(bubble, null);
+    chatArea.scrollTop = chatArea.scrollHeight;
+    let baseAssistantCount = 0;
+    try {
+        const r0 = await fetch("/api/conversations/" + cid + "/messages");
+        const ms0 = await r0.json();
+        baseAssistantCount = ms0.filter(m => m.role === "assistant").length;
+    } catch (e) {}
+    let stopped = false;
+    function finishUI() {
+        isGenerating = false;
+        generatingConvId = null;
+        btnSend.style.display = "";
+        btnStop.style.display = "none";
+        btnSend.disabled = false;
+    }
+    while (!stopped) {
+        await new Promise(r => setTimeout(r, 1200));
+        if (cid !== currentConvId) { finishUI(); return; }
+        let done = false, content = null, ts = 0;
+        try {
+            const act = await fetch("/api/chat/active/" + cid);
+            const aj = act.ok ? await act.json() : { active: false };
+            if (!aj.active) done = true;
+            const r = await fetch("/api/conversations/" + cid + "/messages");
+            const ms = await r.json();
+            const assistantCount = ms.filter(m => m.role === "assistant").length;
+            if (assistantCount > baseAssistantCount) {
+                for (let i = ms.length - 1; i >= 0; i--) {
+                    if (ms[i].role === "assistant") { content = ms[i].content; ts = ms[i].ts || 0; break; }
+                }
+            }
+        } catch (e) { continue; }
+        const hasText = typeof content === "string" && content.length > 0;
+        const hasMulti = Array.isArray(content) && content.length > 0;
+        if (hasText || hasMulti) {
+            const pollBubbleMsg = bubble.closest(".message");
+            chatArea.querySelectorAll(".message.ai").forEach(el => {
+                if (el !== pollBubbleMsg && el.querySelector(".msg-images")) el.remove();
+            });
+            removeImageLoading(bubble);
+            if (pollBubbleMsg) pollBubbleMsg.remove();
+            const text = typeof content === "string" ? content : (content.find(c => c.type === "text") || {}).text || "";
+            const imgs = Array.isArray(content) ? content.filter(c => c.type === "image_url").map(c => c.image_url.url) : [];
+            const newBubble = addMessage("ai", text, imgs);
+            const newMsg = newBubble.closest(".message");
+            attachAiActions(newMsg, text, { allowRegen: true, ts: ts || Math.floor(Date.now() / 1000) });
+            chatArea.scrollTop = chatArea.scrollHeight;
+            stopped = true;
+            finishUI();
+            await loadConversations();
+            return;
+        }
+        if (done) {
+            removeImageLoading(bubble);
+            const aiMsg = bubble.closest(".message");
+            if (aiMsg) aiMsg.remove();
+            stopped = true;
+            finishUI();
+            await loadConversations();
+            return;
+        }
+    }
+}
+
+async function attachToActiveStream(cid) {
+    const abortCtrl = new AbortController();
+    currentAbort = abortCtrl;
+    isGenerating = true;
+    generatingConvId = cid;
+    btnSend.style.display = "none";
+    btnStop.style.display = "";
+    // 复用历史里已渲染的最后一条 AI 气泡，避免续接时重复出现两段回复；
+    // attach 会从头重放全部事件，刚好覆盖填满这条气泡。
+    let bubble, cursor;
+    const aiMsgs = chatArea.querySelectorAll(".message.ai");
+    const lastAiMsg = aiMsgs.length ? aiMsgs[aiMsgs.length - 1] : null;
+    const existingBubble = lastAiMsg ? lastAiMsg.querySelector(".bubble") : null;
+    if (existingBubble) {
+        lastAiMsg.querySelectorAll(".msg-actions, .ai-actions, .btn-copy, .btn-regen, .btn-retry").forEach(el => el.remove());
+        bubble = existingBubble;
+        bubble.classList.add("streaming");
+        bubble.innerHTML = "";
+        cursor = document.createElement("span");
+        cursor.className = "stream-cursor";
+        bubble.appendChild(cursor);
+    } else {
+        const made = addAiBubble();
+        bubble = made.bubble;
+        cursor = made.cursor;
+    }
+    let fullText = "";
+    let reasoningText = "";
+    let isReasoning = false;
+    let searchStatusText = "";
+    let searchSources = [];
+    let askPayload = null;
+    let streamMsgTs = 0;
+    let streamImages = [];
+    // 续接（切回/刷新）时恢复滚动黏性：默认跟随到底，用户主动上滚才脱离
+    userScrolledUp = false;
+    chatArea.scrollTop = chatArea.scrollHeight;
+    function rerender() {
+        // 在写入新内容之前测量是否贴底，避免插入大标题块（高度增量>阈值）导致误判离底而停止跟随
+        const wasAtBottom = !userScrolledUp && (chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 30);
+        if (cursor.parentNode) cursor.remove();
+        let html = "";
+        if (searchStatusText) html += '<div class="search-status">🌐 ' + escapeHtml(searchStatusText) + '</div>';
+        if (reasoningText) {
+            const summary = isReasoning ? "思考中..." : "已深度思考";
+            html += '<details class="reasoning-block"' + (isReasoning ? ' open' : '') + '><summary>' + summary + '</summary><div class="reasoning-content">' + renderMarkdown(reasoningText) + '</div></details>';
+        }
+        if (fullText) html += renderMarkdown(fullText);
+        bubble.innerHTML = html;
+        bubble.appendChild(cursor);
+        if (wasAtBottom) chatArea.scrollTop = chatArea.scrollHeight;
+    }
+    try {
+        const resp = await fetch("/api/chat/attach/" + cid, { signal: abortCtrl.signal });
+        if (!resp.ok) {
+            const m = bubble.closest(".message");
+            if (m) m.remove();
+            generatingConvId = null;
+            return;
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (const line of lines) {
+                if (!line.startsWith("data: ")) continue;
+                const data = line.slice(6);
+                if (data === "[DONE]") continue;
+                try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.error) {
+                        removeImageLoading(bubble);
+                        bubble.textContent = "";
+                        const errDiv = document.createElement("div");
+                        errDiv.className = "error-msg";
+                        errDiv.textContent = parsed.error;
+                        bubble.appendChild(errDiv);
+                        appendErrorHelpLink(bubble);
+                        break;
+                    }
+                    if (parsed.replace) { fullText = parsed.replace; rerender(); }
+                    if (parsed.reasoning_start) isReasoning = true;
+                    if (parsed.reasoning) { reasoningText += parsed.reasoning; rerender(); }
+                    if (parsed.reasoning_end) { isReasoning = false; rerender(); }
+                    if (parsed.chunk) { removeImageLoading(bubble); fullText += parsed.chunk; rerender(); }
+                    if (parsed.search_status) { searchStatusText = parsed.search_status; rerender(); }
+                    if (parsed.sources) searchSources = parsed.sources;
+                    if (parsed.image_loading) showImageLoading(bubble, cursor);
+                    if (parsed.images) { streamImages = parsed.images; removeImageLoading(bubble); }
+                    if (parsed.ask) askPayload = parsed.ask;
+                    if (parsed.compress) showCompressNotice(parsed.compress.threshold_kb);
+                    if (parsed.ts) streamMsgTs = parsed.ts;
+                } catch { fullText += data; rerender(); }
+            }
+        }
+    } catch (err) {
+        if (err.name === "AbortError") {
+            if (cursor.parentNode) cursor.remove();
+            return;
+        }
+    } finally {
+        if (currentAbort === abortCtrl) {
+            currentAbort = null;
+            isGenerating = false;
+            generatingConvId = null;
+            btnSend.style.display = "";
+            btnStop.style.display = "none";
+            btnSend.disabled = false;
+        }
+        if (cursor.parentNode) cursor.remove();
+    }
+    if (askPayload) {
+        fullText = fullText.replace(/\[ASK\][\s\S]*?\[\/ASK\]/g, "").trim();
+        if (askPayload.prefix) fullText = String(askPayload.prefix);
+    }
+    bubble.classList.remove("streaming");
+    let finalHtml = "";
+    if (reasoningText) finalHtml += '<details class="reasoning-block"><summary>已深度思考</summary><div class="reasoning-content">' + renderMarkdown(reasoningText) + '</div></details>';
+    if (fullText) {
+        const rendered = renderCallBlocks(fullText);
+        if (rendered) { const tmp = document.createElement("div"); tmp.appendChild(rendered); finalHtml += tmp.innerHTML; }
+        else finalHtml += renderMarkdown(fullText);
+    }
+    if (searchStatusText) finalHtml = '<div class="search-status">🌐 ' + escapeHtml(searchStatusText) + '</div>' + finalHtml;
+    if (searchSources && searchSources.length > 0) {
+        let srcHtml = '<div class="search-sources"><div class="src-title">参考来源</div>';
+        searchSources.forEach((src, i) => {
+            const u = String(src.url || "");
+            const ti = escapeHtml(String(src.title || u));
+            srcHtml += '<a href="' + escapeHtml(u) + '" target="_blank" rel="noopener">' + (i + 1) + '. ' + ti + '</a>';
+        });
+        srcHtml += '</div>';
+        finalHtml += srcHtml;
+    }
+    if (finalHtml || (streamImages && streamImages.length)) {
+        bubble.innerHTML = finalHtml;
+        if (streamImages && streamImages.length) appendBubbleImages(bubble, streamImages);
+        if (askPayload && askPayload.questions && askPayload.questions.length) {
+            renderAskCard(bubble, askPayload.questions);
+        } else {
+            const aiMsgDiv = bubble.closest(".message");
+            attachAiActions(aiMsgDiv, fullText, { allowRegen: true, ts: streamMsgTs || Math.floor(Date.now() / 1000) });
+        }
+    }
+    if ((!streamImages || !streamImages.length) && cid === currentConvId) {
+        try {
+            const r = await fetch("/api/conversations/" + cid + "/messages");
+            const ms = await r.json();
+            for (let i = ms.length - 1; i >= 0; i--) {
+                const mm = ms[i];
+                if (mm.role !== "assistant") continue;
+                if (typeof mm.content === "string") break;
+                const imgs = mm.content.filter(c => c.type === "image_url").map(c => c.image_url.url);
+                if (imgs.length && !bubble.querySelector(".msg-images")) {
+                    appendBubbleImages(bubble, imgs);
+                }
+                break;
+            }
+        } catch (e) {}
+    }
+    await loadConversations();
+}
+
 async function deleteConversation(cid) {
+    const conv = convCache.find(c => c.id === cid);
+    const title = (conv && conv.title) ? conv.title : "该对话";
+    const ok = await confirmDialog("删除对话「" + title + "」？此操作不可恢复。", {
+        title: "删除对话",
+        icon: "\u{1F5D1}\uFE0F",
+        okText: "删除"
+    });
+    if (!ok) return;
     await fetch("/api/conversations/" + cid, { method: "DELETE" });
     if (currentConvId === cid) { currentConvId = null; showWelcome(); headerTitle.textContent = "AI Chat"; }
     await loadConversations();
@@ -1250,6 +2068,28 @@ function shouldAutoScroll() {
     return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 30;
 }
 
+function _makeImgWrap(src, allSrcs) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg-img-wrap";
+    const el = document.createElement("img");
+    el.src = src;
+    el.addEventListener("click", () => { const allImgs = Array.from(chatArea.querySelectorAll(".msg-images img")).map(i => i.src).filter(Boolean); openImageViewer(src, allImgs.length ? allImgs : [src]); });
+    const dl = document.createElement("a");
+    dl.className = "msg-img-dl";
+    dl.title = "下载图片";
+    dl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><path d="M12 15V3"/><polyline points="7 10 12 15 17 10"/><line x1="5" y1="21" x2="19" y2="21"/></svg>';
+    dl.addEventListener("click", e => {
+        e.stopPropagation();
+        const a = document.createElement("a");
+        a.href = src;
+        a.download = "image-" + Date.now() + ".png";
+        a.click();
+    });
+    wrap.appendChild(el);
+    wrap.appendChild(dl);
+    return wrap;
+}
+
 function addMessage(role, content, images, docs, userIndex) {
     hideWelcome();
     const div = document.createElement("div");
@@ -1265,6 +2105,16 @@ function addMessage(role, content, images, docs, userIndex) {
             bubble.appendChild(rendered);
         } else {
             bubble.innerHTML = renderMarkdown(content);
+        }
+        if (images && images.length > 0) {
+            const imgRow = document.createElement("div");
+            imgRow.className = "msg-images";
+            const allSrcs = images.map(img => typeof img === "string" ? img : img.base64);
+            images.forEach(img => {
+                const src = typeof img === "string" ? img : img.base64;
+                imgRow.appendChild(_makeImgWrap(src, allSrcs));
+            });
+            bubble.appendChild(imgRow);
         }
     } else {
         if (docs && docs.length > 0) {
@@ -1283,12 +2133,10 @@ function addMessage(role, content, images, docs, userIndex) {
         if (images && images.length > 0) {
             const imgRow = document.createElement("div");
             imgRow.className = "msg-images";
+            const allSrcs = images.map(img => typeof img === "string" ? img : img.base64);
             images.forEach(img => {
                 const src = typeof img === "string" ? img : img.base64;
-                const el = document.createElement("img");
-                el.src = src;
-                el.addEventListener("click", () => openImageViewer(src));
-                imgRow.appendChild(el);
+                imgRow.appendChild(_makeImgWrap(src, allSrcs));
             });
             bubble.appendChild(imgRow);
         }
@@ -1309,13 +2157,85 @@ function addMessage(role, content, images, docs, userIndex) {
     return bubble;
 }
 
-function openImageViewer(src) {
+function appendBubbleImages(bubble, urls) {
+    if (!urls || !urls.length) return;
+    const imgRow = document.createElement("div");
+    imgRow.className = "msg-images";
+    const allSrcs = urls.map(u => typeof u === "string" ? u : ((u && (u.url || u.base64)) || "")).filter(Boolean);
+    urls.forEach(u => {
+        const src = typeof u === "string" ? u : ((u && (u.url || u.base64)) || "");
+        if (!src) return;
+        imgRow.appendChild(_makeImgWrap(src, allSrcs));
+    });
+    bubble.appendChild(imgRow);
+}
+
+function showImageLoading(bubble, cursor) {
+    if (!bubble || bubble.querySelector(".img-loading")) return;
+    if (cursor && cursor.parentNode) cursor.remove();
+    const box = document.createElement("div");
+    box.className = "img-loading";
+    box.innerHTML = '<span class="img-loading-spinner"></span><span class="img-loading-text">正在生成图片，请稍候…</span>';
+    bubble.appendChild(box);
+}
+
+function removeImageLoading(bubble) {
+    if (!bubble) return;
+    const box = bubble.querySelector(".img-loading");
+    if (box) box.remove();
+}
+
+function openImageViewer(src, allSrcs) {
+    const srcs = (allSrcs && allSrcs.length) ? allSrcs : [src];
+    let idx = srcs.indexOf(src);
+    if (idx < 0) idx = 0;
+
     const overlay = document.createElement("div");
     overlay.className = "image-viewer-overlay";
+
     const img = document.createElement("img");
-    img.src = src;
+    img.src = srcs[idx];
+
+    const btnPrev = document.createElement("button");
+    btnPrev.className = "image-viewer-nav prev";
+    btnPrev.innerHTML = '<svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>';
+    btnPrev.addEventListener("click", e => { e.stopPropagation(); idx = (idx - 1 + srcs.length) % srcs.length; img.src = srcs[idx]; updateNav(); });
+
+    const btnNext = document.createElement("button");
+    btnNext.className = "image-viewer-nav next";
+    btnNext.innerHTML = '<svg viewBox="0 0 24 24"><polyline points="9 6 15 12 9 18"/></svg>';
+    btnNext.addEventListener("click", e => { e.stopPropagation(); idx = (idx + 1) % srcs.length; img.src = srcs[idx]; updateNav(); });
+
+    const counter = document.createElement("div");
+    counter.className = "image-viewer-counter";
+
+    function updateNav() {
+        if (srcs.length <= 1) {
+            btnPrev.classList.add("hidden");
+            btnNext.classList.add("hidden");
+            counter.style.display = "none";
+        } else {
+            btnPrev.classList.remove("hidden");
+            btnNext.classList.remove("hidden");
+            counter.style.display = "";
+            counter.textContent = (idx + 1) + " / " + srcs.length;
+        }
+    }
+
+    overlay.appendChild(btnPrev);
     overlay.appendChild(img);
-    overlay.addEventListener("click", () => overlay.remove());
+    overlay.appendChild(btnNext);
+    overlay.appendChild(counter);
+    updateNav();
+
+    overlay.addEventListener("click", e => { if (e.target === overlay || e.target === img) overlay.remove(); });
+
+    document.addEventListener("keydown", function onKey(e) {
+        if (e.key === "Escape") { overlay.remove(); document.removeEventListener("keydown", onKey); }
+        else if (e.key === "ArrowLeft" && srcs.length > 1) { idx = (idx - 1 + srcs.length) % srcs.length; img.src = srcs[idx]; updateNav(); }
+        else if (e.key === "ArrowRight" && srcs.length > 1) { idx = (idx + 1) % srcs.length; img.src = srcs[idx]; updateNav(); }
+    });
+
     document.body.appendChild(overlay);
 }
 
@@ -1339,66 +2259,257 @@ function addAiBubble() {
 }
 
 
-async function retryLastMessage(userText, rolledBack) {
+async function retryLastMessage(payload) {
     if (isGenerating || !currentConvId) return;
-    if (rolledBack) {
-        const messages = chatArea.querySelectorAll(".message");
-        if (messages.length >= 2) {
-            messages[messages.length - 1].remove();
-            messages[messages.length - 2].remove();
-        } else if (messages.length >= 1) {
-            messages[messages.length - 1].remove();
-        }
-        if (userText) {
-            userInput.value = userText;
-            autoResize();
-            userInput.focus();
-        }
+    payload = payload || {};
+    const retryText = payload.text || "";
+    const retryImages = Array.isArray(payload.images) ? payload.images.slice() : [];
+    const retryDocs = Array.isArray(payload.docs) ? payload.docs.slice() : [];
+    if (!retryText && retryImages.length === 0 && retryDocs.length === 0) return;
+    // 清掉后端残留的失败用户消息，避免重发后历史里出现重复
+    try {
+        await fetch("/api/conversations/" + currentConvId + "/retry", { method: "POST" });
+    } catch (e) {}
+    // 删掉聊天区里失败的那一轮（用户气泡 + 错误气泡）
+    const messages = chatArea.querySelectorAll(".message");
+    if (messages.length >= 2) {
+        messages[messages.length - 1].remove();
+        messages[messages.length - 2].remove();
+    } else if (messages.length >= 1) {
+        messages[messages.length - 1].remove();
+    }
+    convUserCount = Math.max(0, convUserCount - 1);
+    // 用失败时的原始内容直接重新发送（不退回输入框）
+    pendingImages = retryImages;
+    pendingDocs = retryDocs;
+    if (retryImages.length === 0 && retryDocs.length === 0) {
+        await sendMessage(retryText);
     } else {
-        const resp = await fetch("/api/conversations/" + currentConvId + "/retry", { method: "POST" });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        const messages = chatArea.querySelectorAll(".message");
-        if (messages.length >= 2) {
-            messages[messages.length - 1].remove();
-            messages[messages.length - 2].remove();
-        } else if (messages.length >= 1) {
-            messages[messages.length - 1].remove();
-        }
-        const savedInput = userInput.value;
-        const savedImages = pendingImages.slice();
-        const savedDocs = pendingDocs.slice();
-        const plainText = restorePendingFromText(data.user_message || "");
-        if (data.images && data.images.length > 0) {
-            pendingImages = data.images.map((url, i) => ({ name: "image_" + i, base64: url }));
-        }
-        userInput.value = plainText;
+        userInput.value = retryText;
         renderPreviews();
         autoResize();
-        if (!plainText && pendingImages.length === 0 && pendingDocs.length === 0) {
-            userInput.value = savedInput;
-            pendingImages = savedImages;
-            pendingDocs = savedDocs;
-            renderPreviews();
-            autoResize();
-            await loadConversations();
-            return;
-        }
         await sendMessage();
-        return;
     }
-    await loadConversations();
 }
 
-function appendRetryButton(msgDiv, userText, rolledBack) {
+function appendErrorHelpLink(container) {
+    if (!container || container.querySelector(".error-help-link")) return;
+    const link = document.createElement("a");
+    link.className = "error-help-link";
+    link.href = "javascript:void(0)";
+    link.textContent = "为什么会出错？点击查看可能的原因";
+    link.addEventListener("click", function (e) {
+        e.preventDefault();
+        showErrorHelp();
+    });
+    container.appendChild(link);
+}
+
+const ERROR_HELP_SECTIONS = [
+    {
+        title: "服务器返回的报错（带数字代码）",
+        desc: "提示里出现类似 [400] [413] [429] 这样的数字，说明请求已经发到 AI 服务那边，但被拒绝了。下面是常见数字的可能原因：",
+        items: [
+            ["400 / 422", "请求格式或参数被拒绝。多半是模型名填错、消息内容不被该模型支持，或带了它不认识的参数。可换个模型再试。"],
+            ["401 / 403", "鉴权没通过。API Key 填错、过期、被封，或这个 Key 没有调用该模型的权限。请到设置里核对或更换 Key。"],
+            ["402", "账户欠费 / 余额不足 / 额度用尽。请到对应服务商充值或检查套餐。"],
+            ["404", "找不到模型或接口地址。多半是模型名拼错，或 API 地址（base url）填错了。"],
+            ["408 / 504", "服务器响应超时。一般是对方繁忙或网络拥堵，稍等一会儿重试通常就好。"],
+            ["413", "发送的内容太大（Payload Too Large）。常见于一次性发了过大的图片或过长的文本/文档，缩小图片、删减内容或分批发送即可。"],
+            ["429", "请求太频繁或达到调用上限。降低发送频率、稍后再试，或检查服务商的限速与配额。"],
+            ["500 / 502 / 503", "服务商自己那边出故障了，和你的设置无关，通常过一会儿会自动恢复，重试即可。"]
+        ]
+    },
+    {
+        title: "网络连接问题（连不上 / 超时）",
+        desc: "提示里出现“连接超时”“无法连接”“网络错误”等字样，说明请求没能正常发出去或没收到回复，问题多在本机网络或地址：",
+        items: [
+            ["连接超时 / 无法连接", "连不上服务器。检查本机网络是否正常，确认 API 地址填写正确且能访问（有些地址需要代理）。"],
+            ["读取超时", "已经连上了，但等回复等太久。可能模型生成慢或服务繁忙，稍后重试，或换个更快的模型。"],
+            ["SSL / 证书错误", "加密连接握手失败。检查 API 地址是否正确、系统时间是否准、代理设置是否异常。"],
+            ["代理错误", "走了代理但代理不通。检查本机代理设置，或先关闭代理再试。"]
+        ]
+    },
+    {
+        title: "发送前就被拦下的提示",
+        desc: "这类提示在请求还没发出去时就出现，通常是配置或操作问题，按提示处理即可：",
+        items: [
+            ["未配置 API Key", "还没在设置里填 Key，去「设置」填入有效的 API Key。"],
+            ["未选择模型", "当前没选模型，在右下角选一个，或先在设置里添加模型。"],
+            ["消息不能为空", "没输入内容也没带图片就点了发送，输入后再发。"],
+            ["对话正在生成中", "上一条还没生成完又发了新消息，等它结束或点停止后再发。"],
+            ["对话不存在", "当前对话可能已被删除或状态过期，刷新页面后重新进入或新建对话。"]
+        ]
+    },
+    {
+        title: "实在排查不出时",
+        desc: "可以按下面顺序逐项排查：",
+        items: [
+            ["1. 先点重试", "很多错误（超时、服务商抖动）重试一下就好。"],
+            ["2. 查网络", "确认能正常打开其它网页。"],
+            ["3. 查设置", "核对 API Key、API 地址、模型名是否正确。"],
+            ["4. 换模型", "换个模型再试，排除某个模型本身的问题。"],
+            ["5. 查图片", "如果带了图片，确认所用模型支持图片输入。"]
+        ]
+    }
+];
+
+function showErrorHelp() {
+    let overlay = document.getElementById("error-help-overlay");
+    if (!overlay) {
+        overlay = document.createElement("div");
+        overlay.id = "error-help-overlay";
+        overlay.className = "error-help-overlay";
+        const dialog = document.createElement("div");
+        dialog.className = "error-help-dialog";
+
+        const head = document.createElement("div");
+        head.className = "error-help-head";
+        const h = document.createElement("div");
+        h.className = "error-help-title";
+        h.textContent = "报错原因速查";
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "error-help-close";
+        closeBtn.innerHTML = "&times;";
+        closeBtn.setAttribute("aria-label", "关闭");
+        head.appendChild(h);
+        head.appendChild(closeBtn);
+
+        const body = document.createElement("div");
+        body.className = "error-help-body";
+        ERROR_HELP_SECTIONS.forEach(sec => {
+            const secEl = document.createElement("div");
+            secEl.className = "error-help-section";
+            const st = document.createElement("h4");
+            st.textContent = sec.title;
+            secEl.appendChild(st);
+            if (sec.desc) {
+                const sd = document.createElement("p");
+                sd.className = "error-help-desc";
+                sd.textContent = sec.desc;
+                secEl.appendChild(sd);
+            }
+            sec.items.forEach(pair => {
+                const row = document.createElement("div");
+                row.className = "error-help-row";
+                const k = document.createElement("span");
+                k.className = "error-help-key";
+                k.textContent = pair[0];
+                const v = document.createElement("span");
+                v.className = "error-help-val";
+                v.textContent = pair[1];
+                row.appendChild(k);
+                row.appendChild(v);
+                secEl.appendChild(row);
+            });
+            body.appendChild(secEl);
+        });
+
+        dialog.appendChild(head);
+        dialog.appendChild(body);
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+
+        function close() { overlay.classList.remove("active"); }
+        closeBtn.addEventListener("click", close);
+        overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
+        document.addEventListener("keydown", e => {
+            if (e.key === "Escape" && overlay.classList.contains("active")) close();
+        });
+    }
+    overlay.classList.add("active");
+}
+
+function appendRetryButton(msgDiv, text, images, docs) {
     const existing = msgDiv.querySelector(".btn-retry");
     if (existing) existing.remove();
+    const payload = {
+        text: text || "",
+        images: Array.isArray(images) ? images.slice() : [],
+        docs: Array.isArray(docs) ? docs.slice() : []
+    };
     const btn = document.createElement("button");
-    btn.className = "btn-retry" + (rolledBack ? " error-retry" : "");
+    btn.className = "btn-retry error-retry";
     btn.title = "重试";
     btn.innerHTML = REGEN_ICON_SVG;
-    btn.addEventListener("click", () => retryLastMessage(userText, rolledBack));
+    btn.addEventListener("click", () => retryLastMessage(payload));
     msgDiv.appendChild(btn);
+}
+
+function markFailedUserMessage(aiMsgDiv, text, images, docs) {
+    if (!aiMsgDiv) return;
+    let userMsg = aiMsgDiv.previousElementSibling;
+    while (userMsg && !userMsg.classList.contains("user")) {
+        userMsg = userMsg.previousElementSibling;
+    }
+    if (!userMsg) return;
+    userMsg.dataset.failed = "1";
+    const payload = {
+        text: text || "",
+        images: Array.isArray(images) ? images.slice() : [],
+        docs: Array.isArray(docs) ? docs.slice() : []
+    };
+    const existing = userMsg.querySelector(".btn-undo");
+    if (existing) existing.remove();
+    const btn = document.createElement("button");
+    btn.className = "btn-undo";
+    btn.title = "撤回这条未发送成功的消息（内容退回输入框）";
+    btn.innerHTML = UNDO_ICON_SVG;
+    btn.addEventListener("click", async () => {
+        const ok = await confirmDialog("撤回这条未发送成功的消息？内容将退回输入框。", {
+            title: "撤回消息",
+            icon: "\u21A9\uFE0F",
+            okText: "撤回",
+            cancelText: "取消"
+        });
+        if (!ok) return;
+        undoFailedMessage(userMsg, aiMsgDiv, payload);
+    });
+    userMsg.appendChild(btn);
+}
+
+function undoFailedMessage(userMsg, aiMsgDiv, payload) {
+    if (aiMsgDiv && aiMsgDiv.parentNode) aiMsgDiv.remove();
+    if (userMsg && userMsg.parentNode) userMsg.remove();
+    if (chatArea.querySelectorAll(".message").length === 0) {
+        showWelcome();
+    }
+    convUserCount = chatArea.querySelectorAll(".message.user").length;
+
+    const hasStructuredDocs = Array.isArray(payload.docs)
+        && payload.docs.length > 0
+        && payload.docs.every(d => d && typeof d.text === "string" && d.text.length > 0);
+
+    let restoredText;
+    if (hasStructuredDocs) {
+        pendingDocs = payload.docs.map(d => ({
+            name: d.name,
+            text: d.text,
+            charCount: typeof d.charCount === "number" ? d.charCount : d.text.length,
+            truncated: !!d.truncated,
+            loading: false
+        }));
+        restoredText = payload.text != null ? String(payload.text) : "";
+    } else {
+        restoredText = restorePendingFromText(payload.text || "");
+        if (!restoredText && pendingDocs.length === 0 && Array.isArray(payload.docs) && payload.docs.length > 0) {
+            pendingDocs = payload.docs.slice();
+        }
+    }
+
+    if (Array.isArray(payload.images) && payload.images.length > 0) {
+        pendingImages = payload.images.map((img, i) => ({
+            name: "image_" + i,
+            base64: (typeof img === "string" ? img : img.base64)
+        }));
+    } else {
+        pendingImages = [];
+    }
+    renderPreviews();
+
+    userInput.value = restoredText;
+    autoResize();
+    userInput.focus();
 }
 
 const UNDO_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><path d="M9 14L4 9l5-5"></path><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"></path></svg>';
@@ -1737,24 +2848,11 @@ function renderAskCard(bubble, questions) {
         btnNext.textContent = (cur === pages.length - 1) ? "提交回答" : "下一步";
     }
 
-    function validateCurrent() {
-        const p = pages[cur];
-        if (p.optional) return true;
-        if (p.type === "choice") {
-            if (!p.selected) { showToast("请先回答这个问题", "error"); return false; }
-            if (p.selected === "其他" && !p.otherText.trim()) { showToast("请描述你的“其他”答案", "error"); return false; }
-        } else {
-            if (!p.textVal.trim()) { showToast("请先回答这个问题", "error"); return false; }
-        }
-        return true;
-    }
-
     btnPrev.addEventListener("click", () => {
         if (cur > 0) { cur--; renderPage(); }
     });
 
     btnNext.addEventListener("click", () => {
-        if (!validateCurrent()) return;
         if (cur < pages.length - 1) {
             cur++;
             renderPage();
@@ -1771,21 +2869,30 @@ function renderAskCard(bubble, questions) {
         caret.textContent = "▸";
 
         const lines = [];
+        let anyAnswered = false;
         pages.forEach((p, i) => {
             if (p.optional) {
                 const sup = p.textVal.trim();
-                if (sup) lines.push("补充：" + sup);
+                if (sup) { lines.push("补充：" + sup); anyAnswered = true; }
                 return;
             }
             let ans = "";
             if (p.type === "choice") {
-                ans = (p.selected === "其他") ? (p.otherText.trim() || "（其他，未填写）") : p.selected;
+                ans = (p.selected === "其他") ? p.otherText.trim() : (p.selected || "");
             } else {
                 ans = p.textVal.trim();
             }
-            lines.push((i + 1) + ". " + p.q + " → " + ans);
+            if (ans) {
+                anyAnswered = true;
+                lines.push((i + 1) + ". " + p.q + " → " + ans);
+            } else {
+                lines.push((i + 1) + ". " + p.q + " → （未回答，请你自行判断）");
+            }
         });
-        const answerText = "【我对你的提问的回答】\n" + lines.join("\n");
+        const head = anyAnswered
+            ? "【我对你的提问的回答】（未回答的项请你自行判断、合理猜测，无需再追问）\n"
+            : "【我跳过了你的全部提问】请你自行判断、合理猜测后直接继续，无需再追问。\n";
+        const answerText = head + lines.join("\n");
         sendMessage(answerText, { askAnswer: true });
     });
 
@@ -1795,11 +2902,16 @@ function renderAskCard(bubble, questions) {
 }
 
 function stopGeneration() {
+    const cid = generatingConvId || currentConvId;
+    if (cid) {
+        fetch("/api/chat/stop/" + cid, { method: "POST" }).catch(() => {});
+    }
     if (currentAbort) {
         currentAbort.abort();
         currentAbort = null;
     }
     isGenerating = false;
+    generatingConvId = null;
     btnSend.style.display = "";
     btnStop.style.display = "none";
     btnSend.disabled = false;
@@ -1847,6 +2959,7 @@ async function sendMessage(presetText, opts) {
     const abortCtrl = new AbortController();
     currentAbort = abortCtrl;
     isGenerating = true;
+    generatingConvId = currentConvId;
     btnSend.style.display = "none";
     btnStop.style.display = "";
     const images = isPreset ? [] : pendingImages.slice();
@@ -1881,6 +2994,8 @@ async function sendMessage(presetText, opts) {
             renderPending = false;
             rafId = 0;
             if (streamEnded) return;
+            // 在写入新内容之前测量是否贴底，避免插入大标题块（高度增量>阈值）导致误判离底而停止跟随
+            const wasAtBottom = !userScrolledUp && (chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 30);
             if (cursor.parentNode) cursor.remove();
             let html = "";
             if (searchStatusText) {
@@ -1895,7 +3010,7 @@ async function sendMessage(presetText, opts) {
             }
             bubble.innerHTML = html;
             bubble.appendChild(cursor);
-            if (shouldAutoScroll()) chatArea.scrollTop = chatArea.scrollHeight;
+            if (wasAtBottom) chatArea.scrollTop = chatArea.scrollHeight;
         });
     }
     const { bubble, cursor } = addAiBubble();
@@ -1906,6 +3021,7 @@ async function sendMessage(presetText, opts) {
     let searchSources = [];
     let askPayload = null;
     let streamMsgTs = 0;
+    let streamImages = [];
 
     let messageText = text;
     if (docs.length > 0) {
@@ -1968,7 +3084,9 @@ async function sendMessage(presetText, opts) {
             errDiv.className = "error-msg";
             errDiv.textContent = errMsg;
             bubble.appendChild(errDiv);
-            appendRetryButton(bubble.closest(".message"), text, true);
+            appendErrorHelpLink(bubble);
+            appendRetryButton(bubble.closest(".message"), text, images, docs);
+            markFailedUserMessage(bubble.closest(".message"), text, images, docs);
             return;
         }
 
@@ -1997,7 +3115,9 @@ async function sendMessage(presetText, opts) {
                         errDiv.className = "error-msg";
                         errDiv.textContent = parsed.error;
                         bubble.appendChild(errDiv);
-                        appendRetryButton(bubble.closest(".message"), text, true);
+                        appendErrorHelpLink(bubble);
+                        appendRetryButton(bubble.closest(".message"), text, images, docs);
+                        markFailedUserMessage(bubble.closest(".message"), text, images, docs);
                         break;
                     }
                     if (parsed.replace) {
@@ -2024,6 +3144,7 @@ async function sendMessage(presetText, opts) {
                         scheduleRender();
                     }
                     if (parsed.chunk) {
+                        removeImageLoading(bubble);
                         fullText += parsed.chunk;
                         scheduleRender();
                     }
@@ -2033,6 +3154,13 @@ async function sendMessage(presetText, opts) {
                     }
                     if (parsed.sources) {
                         searchSources = parsed.sources;
+                    }
+                    if (parsed.image_loading) {
+                        showImageLoading(bubble, cursor);
+                    }
+                    if (parsed.images) {
+                        streamImages = parsed.images;
+                        removeImageLoading(bubble);
                     }
                     if (parsed.ask) {
                         askPayload = parsed.ask;
@@ -2064,18 +3192,25 @@ async function sendMessage(presetText, opts) {
             bubble.textContent = "";
             const errDiv = document.createElement("div");
             errDiv.className = "error-msg";
-            errDiv.textContent = "网络错误: " + err.message;
+            errDiv.textContent = "网络错误，未能连接到服务（" + err.message + "）";
             bubble.appendChild(errDiv);
-            appendRetryButton(bubble.closest(".message"), text, true);
+            appendErrorHelpLink(bubble);
+            appendRetryButton(bubble.closest(".message"), text, images, docs);
+            markFailedUserMessage(bubble.closest(".message"), text, images, docs);
         }
     } finally {
         streamEnded = true;
         if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
         if (cursor.parentNode) cursor.remove();
-        currentAbort = null;
-        isGenerating = false;
-        btnSend.style.display = "";
-        btnStop.style.display = "none";
+        if (currentAbort === abortCtrl) {
+            currentAbort = null;
+        }
+        if (generatingConvId === payload.conversation_id) {
+            isGenerating = false;
+            generatingConvId = null;
+        }
+        btnSend.style.display = isGenerating ? "none" : "";
+        btnStop.style.display = isGenerating ? "" : "none";
         btnSend.disabled = false;
         userInput.focus();
     }
@@ -2083,7 +3218,7 @@ async function sendMessage(presetText, opts) {
         fullText = fullText.replace(/\[ASK\][\s\S]*?\[\/ASK\]/g, "").trim();
         if (askPayload.prefix) fullText = String(askPayload.prefix);
     }
-    if (fullText || reasoningText || askPayload) {
+    if (fullText || reasoningText || askPayload || (streamImages && streamImages.length)) {
         bubble.classList.remove("streaming");
         let finalHtml = "";
         if (reasoningText) {
@@ -2113,6 +3248,7 @@ async function sendMessage(presetText, opts) {
             finalHtml += srcHtml;
         }
         bubble.innerHTML = finalHtml;
+        if (streamImages && streamImages.length) appendBubbleImages(bubble, streamImages);
         if (askPayload && askPayload.questions && askPayload.questions.length) {
             renderAskCard(bubble, askPayload.questions);
         } else {
@@ -2130,7 +3266,7 @@ async function openSettings() {
     setMaxRounds.value = cfg.max_history_rounds || 50;
     setMaxContextSize.value = cfg.max_context_size_kb || 0;
     setAutoCompress.checked = !!cfg.auto_compress;
-    setCompressThreshold.value = cfg.compress_threshold_kb || 8;
+    setCompressThreshold.value = cfg.compress_threshold_kb || 128;
     updateCompressRow();
     syncAppearanceControls();
     settingsOverlay.classList.add("active");
@@ -2153,7 +3289,7 @@ async function saveSettings() {
         max_history_rounds: parseInt(setMaxRounds.value) || 50,
         max_context_size_kb: parseInt(setMaxContextSize.value) || 0,
         auto_compress: !!setAutoCompress.checked,
-        compress_threshold_kb: parseInt(setCompressThreshold.value) || 8
+        compress_threshold_kb: parseInt(setCompressThreshold.value) || 128
     };
     try {
         const resp = await fetch("/api/settings", {
@@ -2773,4 +3909,135 @@ async function shareConversation(c) {
             showToast("导入失败", "error");
         }
     });
+})();
+
+
+// ==================== 对话内字符查找 ====================
+(function setupChatSearch() {
+    const supported = (typeof CSS !== "undefined" && CSS.highlights);
+    const wrap = document.getElementById("header-search");
+    const btnToggle = document.getElementById("btn-toggle-search");
+    const input = document.getElementById("search-input");
+    const countEl = document.getElementById("search-count");
+    const btnPrev = document.getElementById("search-prev");
+    const btnNext = document.getElementById("search-next");
+    const btnClose = document.getElementById("search-close");
+    if (!wrap || !btnToggle || !input) return;
+
+    let matches = [];
+    let current = -1;
+
+    function clearHighlights() {
+        if (supported) {
+            CSS.highlights.delete("chat-search");
+            CSS.highlights.delete("chat-search-current");
+        }
+        matches = [];
+        current = -1;
+        updateCount();
+    }
+
+    function updateCount() {
+        countEl.textContent = matches.length ? (current + 1) + "/" + matches.length : "0/0";
+    }
+
+    function collectTextNodes(root) {
+        const nodes = [];
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+                const p = node.parentElement;
+                if (p && p.closest(".katex, script, style")) return NodeFilter.FILTER_REJECT;
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+        let n;
+        while ((n = walker.nextNode())) nodes.push(n);
+        return nodes;
+    }
+
+    function doSearch() {
+        if (!supported) return;
+        const kw = input.value;
+        CSS.highlights.delete("chat-search");
+        CSS.highlights.delete("chat-search-current");
+        matches = [];
+        current = -1;
+        if (!kw) { updateCount(); return; }
+        const needle = kw.toLowerCase();
+        const nodes = collectTextNodes(chatArea);
+        nodes.forEach(node => {
+            const text = node.nodeValue.toLowerCase();
+            let idx = text.indexOf(needle);
+            while (idx !== -1) {
+                const range = new Range();
+                range.setStart(node, idx);
+                range.setEnd(node, idx + needle.length);
+                matches.push(range);
+                idx = text.indexOf(needle, idx + needle.length);
+            }
+        });
+        if (matches.length) {
+            CSS.highlights.set("chat-search", new Highlight(...matches));
+            current = 0;
+            focusCurrent();
+        }
+        updateCount();
+    }
+
+    function focusCurrent() {
+        if (!supported || current < 0 || current >= matches.length) return;
+        const range = matches[current];
+        CSS.highlights.delete("chat-search-current");
+        CSS.highlights.set("chat-search-current", new Highlight(range));
+        const el = range.startContainer.parentElement;
+        if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "center" });
+        updateCount();
+    }
+
+    function go(delta) {
+        if (!matches.length) return;
+        current = (current + delta + matches.length) % matches.length;
+        focusCurrent();
+    }
+
+    function openSearch() {
+        wrap.classList.add("open");
+        input.focus();
+        input.select();
+        if (input.value) doSearch();
+    }
+
+    function closeSearch() {
+        wrap.classList.remove("open");
+        clearHighlights();
+        input.value = "";
+    }
+
+    window.clearChatSearch = function () {
+        if (wrap.classList.contains("open")) doSearch();
+        else clearHighlights();
+    };
+
+    btnToggle.addEventListener("click", () => {
+        if (wrap.classList.contains("open")) closeSearch();
+        else openSearch();
+    });
+    btnClose.addEventListener("click", closeSearch);
+    btnPrev.addEventListener("click", () => go(-1));
+    btnNext.addEventListener("click", () => go(1));
+
+    let debounce = null;
+    input.addEventListener("input", () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(doSearch, 150);
+    });
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); go(e.shiftKey ? -1 : 1); }
+        else if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+    });
+
+    if (!supported) {
+        btnToggle.style.display = "none";
+    }
 })();

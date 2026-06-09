@@ -1,202 +1,143 @@
-# PolyAI Chat — Web 端多模型 AI 对话工具
+# PolyAI Chat — 多模型 AI 对话工具
 
-一个基于 Flask 的 Web AI 对话工具，支持多对话管理、多模型切换、自定义智能体、文件上传解析，兼容所有 OpenAI Chat Completions API 格式的服务。
+一个基于 Flask 的 Web AI 对话工具，支持多对话管理、多模型切换、自定义智能体、项目知识库、文件上传解析、智能联网搜索，兼容所有 OpenAI Chat Completions API 格式的服务。
 
 > 本分支 (`PolyAI-Web`) 专注于 Web 端，终端版（Linux/Windows）请切换到 `PolyAI-CLI` 分支。
 
-## 项目结构
+## 🚀 快速开始
 
-```
-api调用脚本/
-├── start.py                    # 单文件跨平台一键启动器（依赖自检 + 服务管理）
-├── web/
-│   ├── app.py                  # Flask 后端 + API 路由 + 配置区
-│   ├── chat_core.py            # 公共核心（API 请求、流式解析、历史管理）
-│   ├── web_search.py           # 联网搜索（智能判断、查询规划、网页抓取与评估）
-│   ├── templates/
-│   │   └── index.html          # 聊天页面
-│   └── static/
-│       ├── style.css           # 深色主题样式
-│       ├── app.js              # 前端交互逻辑
-│       ├── icon.svg            # 图标
-│       ├── marked.min.js       # Markdown 渲染库
-│       ├── highlight.min.js     # 代码语法高亮库
-│       ├── highlight-theme.min.css # 代码高亮主题
-│       ├── katex.min.js         # 数学公式渲染库
-│       ├── katex.min.css        # 公式样式
-│       ├── katex-auto-render.min.js # 公式自动识别渲染
-│       ├── fonts/               # KaTeX 字体
-│       └── uploads/            # 智能体头像上传目录（自动创建）
-├── 提示词/                     # 系统提示词文件目录
-│   └── 无限制.txt
-├── .gitignore
-└── README.md
-```
-
-以下文件运行时自动生成，已被 `.gitignore` 排除：
-
-| 文件 | 说明 |
-|------|------|
-| `web/settings.json` | 运行时配置持久化（服务商、模型、Key 路径等） |
-| `web/agents.json` | 智能体配置持久化 |
-| `web/conversations.json` | 对话历史持久化 |
-| `web/.apikey` | 按服务商分别存储的 API Key（JSON） |
-| `web/.polyai.pid` | 后台进程 PID 文件 |
-| `web/.polyai.log` | 后台运行日志 |
-| `web/static/uploads/` | 智能体头像上传目录 |
-
-## 前置条件
-
-- Python 3.8+
-- `requests` 库
-- `flask` 库
-- 一个 API Key 文件（纯文本，内容只有 Key 本身）
+1. 安装依赖（首次运行会自动检测并提示安装，通常可跳过）：
 
 ```bash
 pip install requests flask
 ```
 
-如果需要上传 PDF / Word / Excel 文件并自动解析，还需安装（可选）：
+2. 启动服务：
 
 ```bash
-pip install PyPDF2 python-docx openpyxl
+python3 start.py
 ```
 
-> 使用 `python start.py` 启动时会自动检测以上依赖，缺失时询问并一键安装，通常无需手动执行。
+启动后会自动打开浏览器访问 `http://localhost:8080`，局域网设备可访问 `http://你的IP:8080`。
 
-## 快速启动
+3. 在浏览器界面里打开「设置」，填写 **API Key、服务商、模型**，即可开始对话。
 
-跨平台单文件启动器 `start.py`，Windows / Linux / macOS 通用。首次运行会自动检测
-Python 版本与依赖，缺失时询问并一键安装，随后后台启动服务并自动打开浏览器。
+### ⚠️ Windows 用户注意
+
+如果 Windows 下运行 `py start.py` 无法正常启动（无输出、窗口闪退），请改用以下命令：
 
 ```bash
-python start.py            # 启动（默认，可双击运行）
-python start.py stop       # 关闭
-python start.py restart    # 重启
-python start.py status     # 查看运行状态
-python start.py log        # 查看最近日志
-python start.py install    # 仅检测并安装依赖
+python -u start.py
 ```
 
-服务以后台进程运行，PID 记录在 `web/.polyai.pid`，日志输出到 `web/.polyai.log`。
-启动时若端口已被占用会自动释放；已在运行时不会重复启动。
+### 常用命令
 
-**手动启动：**
+`start.py` 跨平台通用（Windows / Linux / macOS），还支持以下子命令：
 
 ```bash
-cd web
-python3 app.py
+python3 start.py            # 启动（默认）
+python3 start.py stop       # 关闭
+python3 start.py restart    # 重启
+python3 start.py status     # 查看运行状态
+python3 start.py log        # 查看最近日志
+python3 start.py install    # 仅检测并安装依赖
 ```
 
-启动后访问 `http://localhost:8080`，局域网设备访问 `http://你的IP:8080`。
+> 如需上传 PDF / Word / Excel 并自动解析，可额外安装：`pip install PyPDF2 python-docx openpyxl`
 
-## 功能
-
-### 多对话管理
-- 侧边栏创建、切换、删除对话
-- 每个对话独立维护历史记录
-- 对话标题自动生成，支持手动修改
-- 对话置顶，置顶项自动分组排在列表顶部
-- 顶部搜索框按标题实时筛选对话
-- 对话历史持久化到 `conversations.json`，重启不丢失
-- 支持导出 / 分享单个对话为 JSON 文件，侧边栏「导入对话」可一键导入（合并 / 覆盖）
+## ✨ 功能
 
 ### 多模型支持
+- 内置 DeepSeek、OpenAI、Claude、Gemini、通义千问、智谱 GLM、Moonshot / Kimi 等主流服务商及其常用模型
+- 兼容任意 OpenAI 格式的自定义接口，可自行添加 / 编辑 / 删除模型
+- 设置面板切换服务商、模型、API Key、接口地址；输入框下方还有模型快速切换栏
 
-内置以下服务商和模型：
+### 多对话管理
+- 侧边栏创建、切换、删除、置顶对话，标题自动生成也可手动修改
+- 顶部搜索框按标题实时筛选
+- 对话历史自动保存，重启不丢失
+- 单个对话可导出 / 分享为文件，也能一键导入（合并 / 覆盖）
 
-| 服务商 | 模型 |
-|--------|------|
-| DeepSeek | deepseek-chat, deepseek-reasoner, deepseek-v4-pro, deepseek-v4-flash |
-| OpenAI | gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-3.5-turbo, o1, o1-mini, o3-mini |
-| Claude | claude-sonnet-4-20250514, claude-3-5-sonnet-20241022, claude-3-haiku, claude-3-opus |
-| Google Gemini | gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash, gemini-1.5-pro |
-| 通义千问 | qwen-max, qwen-plus, qwen-turbo, qwen-long |
-| 智谱 GLM | glm-4-plus, glm-4, glm-4-flash, glm-4-long |
-| Moonshot / Kimi | moonshot-v1-128k, moonshot-v1-32k, moonshot-v1-8k |
-| 自定义 | 任意 OpenAI 兼容接口 |
-
-- 设置面板中可切换服务商、模型、API Key、接口地址
-- 输入框下方模型快速切换栏
-- 支持添加、编辑、删除自定义模型
+### 项目 & 知识库
+- 把相关对话归到一个「项目」下，侧边栏按项目分组管理，可随时移入 / 移出
+- 每个项目可设置专属人设（系统提示词）和绑定模型，项目内新建对话自动套用
+- 项目知识库：上传纯文本资料（txt / md 等），项目内所有对话都能引用这些内容
 
 ### 自定义智能体
-- 输入框上方智能体选择器
-- 每个智能体可配置：名称、头像、系统提示词、绑定模型和服务商
-- 智能体管理面板支持新建、编辑、删除、上传头像
-- 切换智能体实时生效，系统提示词即时更换
-- 不选择智能体时为通用模式（无系统提示词）
-
-### 智能体互调
-- 智能体可设为「可调用」，配置英文标识名和调用说明
-- 主智能体在回复中使用 `[CALL:标识名]...[/CALL]` 自动调用子智能体
-- 子智能体独立发起 API 请求，结果自动回填到主回复中
-
-### 文件上传
-- 支持上传文件并自动提取文本内容作为对话上下文
-- 支持格式：PDF、Word (.docx)、Excel (.xlsx)、CSV、TXT、Markdown、代码文件等
-- 支持图片上传（发送给支持多模态的模型）
-- 单次提取上限 10 万字符
+- 每个智能体可配置名称、头像、系统提示词、绑定模型和服务商
+- 输入框上方一键切换，切换后人设即时生效；不选时为通用模式
+- 支持「智能体互调」：主智能体回复中用 `[CALL:标识名]…[/CALL]` 自动调用其他智能体协作
 
 ### 智能联网搜索
-- 输入框旁一键开启联网，回答前自动检索互联网最新信息
-- 内置搜索决策器：自动判断本条消息是否需要联网，闲聊 / 写代码 / 翻译等直接跳过，省时省 token
-- 自动规划查询词、抓取并评估网页相关性，回答末尾附「参考来源」
-- 全链路注入真实日期，避免被网页里的旧日期误导对「今天 / 最新」的判断
+- 一键开启联网，回答前自动检索互联网最新信息并附「参考来源」
+- 内置判断器：闲聊 / 写代码 / 翻译等无需联网时自动跳过，省时省 token
+- 自动注入真实日期，避免被网页旧日期误导对「今天 / 最新」的判断
+
+### 文件上传 & 图片
+- 上传文件自动提取文本作为对话上下文，支持 PDF、Word、Excel、CSV、TXT、Markdown、代码文件等
+- **图片上传**：支持拖拽 / 粘贴 / 点击选择，前端 Canvas 自动压缩（800px / JPEG 80%）避免中转站大小限制
+- **图片查看器**：点击放大、左右切换多图、计数器、一键下载
+- **AI 生图**：支持 DALL-E / Gemini Image 等生图模型（模型名含 `image`/`dall-e`/`-image` 自动识别），生成结果内联展示
+
+### 对话内搜索
+- 聊天区顶部搜索框，关键词高亮匹配当前对话所有消息
+- 上/下导航跳转，显示匹配数量
+
+### 后台生成保护
+- AI 生成过程中切换对话或刷新页面不会中断，后台继续运行
+- 回到原对话可实时看到后续输出
 
 ### AI 追问
-- 当问题信息不足时，AI 可主动发起追问（`[ASK]…[/ASK]` 协议）
-- 前端渲染为可折叠的追问卡片，用户作答后回传并生成摘要卡片
+- 信息不足时 AI 会主动发起追问，前端渲染为可折叠的追问卡片，作答后自动回传并生成摘要
 
 ### 历史自动压缩
-- 设置面板可开启「自动压缩」，对话历史超过设定阈值（KB）时自动触发
-- 由 LLM 把较早的对话压缩成一份「前情提要」system 消息，保留关键事实与结论
-- 关闭时则按上下文轮数 / 大小直接丢弃最早的对话
-- 压缩发生时前端给出提示
+- 对话过长时可自动把较早内容压缩成「前情提要」，保留关键事实，避免 token 爆掉
+- 也可选择按轮数 / 大小直接丢弃最早的对话
 
-### 代码与消息增强
-- 代码块语法高亮（highlight.js），自动识别语言并显示语言标签
-- 每个代码块带「复制」「下载」按钮，下载按语言自动匹配扩展名
-- AI 消息支持一键复制、重新生成上一条回复
-- 数学公式渲染（KaTeX），支持行内与块级 LaTeX 公式
+### 阅读体验
+- 流式输出逐字显示，可随时停止生成
+- 代码块语法高亮 + 复制 / 下载按钮，数学公式（KaTeX）渲染，完整 Markdown 渲染
+- AI 消息一键复制、重新生成
+- 深色 / 浅色主题切换，聊天字号可调，设置记忆到本地
+- Enter 发送、Shift+Enter 换行，响应式布局支持移动端
 
-### 界面与个性化
-- 深色 / 浅色主题切换，选择记忆到浏览器本地
-- 聊天字号可调（8-40px），即时生效并记忆
+## 📌 使用须知
 
-### 并发与数据安全
-- 每个对话独立加锁，生成回复期间拒绝对该对话的并发操作（删除 / 清空 / 撤回 / 重试），返回友好提示
-- 对话历史采用原子写入（临时文件 + fsync + 替换），避免写入中断导致文件损坏
-- 对话列表按最近更新时间排序
+- **API Key 安全**：Key 保存在本地，请勿提交到 Git；`settings.json`、`agents.json`、`conversations.json`、`projects.json`、Key 文件等已默认排除。
+- **运行环境**：基于 Flask 开发服务器，适合个人 / 局域网使用，不建议直接暴露到公网。
+- **首次配置**：所有服务商、模型、Key、端口等都能在网页设置面板在线修改，无需改代码或重启。
+- **历史长度**：上下文过长会增加 token 消耗，可在设置里调整最大轮数 / 大小，或开启自动压缩。
+- **端口占用**：启动器启动前会自动释放被占用的端口，且不会重复启动已在运行的实例。
 
-### 其他
-- 深色 / 浅色主题界面
-- 流式输出（SSE），AI 回复逐字显示
-- Enter 发送，Shift+Enter 换行
-- Markdown 渲染
-- 清空记忆按钮
-- 重试上一轮对话
-- 响应式布局，支持移动端
-- 配置自动持久化，重启保留设置
 
-## 配置说明
+## ⚠️ 目前已知问题
 
-首次启动时 `app.py` 顶部配置区提供默认值：
+### 图片传输与存储限制
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `BASE_URL` | API 接口地址 | `https://api.deepseek.com/v1/chat/completions` |
-| `KEY_FILE_PATH` | API Key 文件路径 | `/home/sti/apikey.txt` |
-| `MODEL` | 默认模型 | `deepseek-chat` |
-| `MAX_HISTORY_ROUNDS` | 上下文轮数（0 = 不限） | `50` |
-| `PORT` | 监听端口 | `8080` |
+当前系统采用 **OpenAI Chat Completions 多模态格式**传输图片：
 
-启动后可通过网页设置面板在线修改，无需重启。还可配置最大上下文大小 (KB)；超出时默认裁剪早期消息，或开启「自动压缩」改为由 LLM 压成前情提要。
+```json
+{
+  "type": "image_url",
+  "image_url": {
+    "url": "data:image/jpeg;base64,/9j/4AAQ..."
+  }
+}
+```
 
-## 注意事项
+**可收发图片的厂商/模型**（需使用 OpenAI 兼容端点 + 模型本身支持多模态）：
+- OpenAI: GPT-4o, GPT-4o-mini, GPT-Image 系列
+- Google Gemini: 2.5 Flash/Pro, 3.x 系列（通过 `/v1beta/openai` 兼容端点）
+- DeepSeek: deepseek-chat（新版）, V4 系列
+- 通义千问: Qwen3-VL 系列
+- 智谱 GLM: GLM-4V 系列
+- Kimi / 月之暗面: Vision 模型
+- 其他通过中转站透传的 Claude / Grok / MiniMax 等
 
-- API Key 文件不要提交到 Git
-- `settings.json`、`agents.json`、`conversations.json` 已在 `.gitignore` 中排除
-- Flask 开发服务器适合个人使用，不建议暴露到公网
-- `MAX_HISTORY_ROUNDS` 建议设为 20–50，防止 token 消耗过大
-- 启动器启动前若端口被占用会自动释放，不会重复启动已运行的实例
+**当前限制**：
+1. **历史记录不保留图片**：构建请求时仅最后一轮 user 消息携带完整图片，历史轮图片全部替换为 `[图片]` 占位符文本，AI 无法回忆之前看过的图
+2. **智能体间无法传递图片**：`[CALL:xxx]...[/CALL]` 智能体调用只传递纯文字任务描述，不携带图片 base64 或上下文图片
+3. **图片强制 JPEG 压缩**：前端统一通过 Canvas 转 JPEG（质量 0.80，最大边 800px），PNG 透明通道和 GIF 动画会丢失
+4. **中转站大小限制**：不同中转站对请求体大小限制不同（实测 commonstack ~700KB base64 上限），多图叠加可能触发 413 错误
+5. **conversations.json 体积膨胀**：图片以完整 base64 存储在本地 JSON 中，长对话+多图可能导致文件过大
+6. **导出/导入携带完整 base64**：导出的 JSON 包含未压缩的完整图片数据，大文件可能影响解析性能

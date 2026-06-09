@@ -4,6 +4,7 @@ __pycache__/
 web/settings.json
 web/agents.json
 web/conversations.json
+web/projects.json
 web/.polyai.pid
 web/.polyai.log
 web/static/uploads/
