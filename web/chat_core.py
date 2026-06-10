@@ -38,6 +38,8 @@ def build_request_payload(api_key, messages, model, temperature=0.7, stream=True
         "temperature": temperature,
         "stream": stream
     }
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
     return headers, payload
 
 
@@ -113,6 +115,26 @@ def parse_stream_chunk_full(line):
         return (content, reasoning)
     except Exception:
         return ("", "")
+
+
+def parse_stream_usage(line):
+    if not line or not line.startswith("data: "):
+        return None
+    data_str = line[6:]
+    if data_str == "[DONE]":
+        return None
+    try:
+        chunk = json.loads(data_str)
+    except Exception:
+        return None
+    usage = chunk.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return {
+        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        "total_tokens": int(usage.get("total_tokens") or 0),
+    }
 
 
 def _normalize_base_url(base_url):

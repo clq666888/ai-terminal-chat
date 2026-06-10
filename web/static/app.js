@@ -10,7 +10,6 @@ const btnCloseProject = document.getElementById("btn-close-project");
 const btnSaveProject = document.getElementById("btn-save-project");
 const projectName = document.getElementById("project-name");
 const projectPrompt = document.getElementById("project-prompt");
-const projectProvider = document.getElementById("project-provider");
 const projectModel = document.getElementById("project-model");
 const projectKbGroup = document.getElementById("project-kb-group");
 const projectKbList = document.getElementById("project-kb-list");
@@ -36,7 +35,7 @@ const setApiKey = document.getElementById("set-api-key");
 const keyStatus = document.getElementById("key-status");
 const quickModel = document.getElementById("quick-model");
 
-const btnManageModels = document.getElementById("btn-manage-models");
+const btnAddModelEntry = document.getElementById("btn-add-model-entry");
 const modelManageOverlay = document.getElementById("model-manage-overlay");
 const btnCloseManage = document.getElementById("btn-close-manage");
 const customModelListEl = document.getElementById("custom-model-list");
@@ -168,6 +167,30 @@ if (projectKbFile) projectKbFile.addEventListener("change", async () => {
         projectKbFile.value = "";
     }
 });
+
+(function initKbDropZone() {
+    var zone = document.getElementById("project-kb-group");
+    if (!zone) return;
+    var KB_ACCEPT = ".txt,.md,.markdown,.csv,.json,.log,.py,.js,.html,.css,.xml,.yaml,.yml,.ini,.conf,.cfg,.toml,.sh,.ts,.java,.c,.cpp,.go,.rs,.pdf,.docx".split(",");
+    function extOk(n) { var l = n.lastIndexOf("."); if (l < 0) return false; return KB_ACCEPT.indexOf(n.slice(l).toLowerCase()) >= 0; }
+    zone.addEventListener("dragenter", function(e) { e.preventDefault(); e.stopPropagation(); zone.classList.add("kb-drag-over"); });
+    zone.addEventListener("dragover", function(e) { e.preventDefault(); e.stopPropagation(); zone.classList.add("kb-drag-over"); });
+    zone.addEventListener("dragleave", function(e) { e.preventDefault(); e.stopPropagation(); if (!zone.contains(e.relatedTarget)) zone.classList.remove("kb-drag-over"); });
+    zone.addEventListener("drop", function(e) {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.remove("kb-drag-over");
+        var files = [];
+        if (e.dataTransfer && e.dataTransfer.files) {
+            for (var i = 0; i < e.dataTransfer.files.length; i++) {
+                var f = e.dataTransfer.files[i];
+                if (!extOk(f.name)) { showToast(f.name + "：不支持的文件格式", "error"); continue; }
+                files.push(f);
+            }
+        }
+        if (files.length > 0) uploadKbFiles(files);
+    });
+})();
+
 const convSearchInput = document.getElementById("conv-search-input");
 if (convSearchInput) {
     convSearchInput.addEventListener("input", () => {
@@ -187,7 +210,7 @@ btnCloseSettings.addEventListener("click", closeSettings);
 btnSaveSettings.addEventListener("click", saveSettings);
 
 quickModel.addEventListener("change", onQuickModelChange);
-btnManageModels.addEventListener("click", openManageModels);
+btnAddModelEntry.addEventListener("click", openManageModels);
 btnCloseManage.addEventListener("click", closeManageModels);
 btnOpenModelManager.addEventListener("click", openModelList);
 btnCloseModelList.addEventListener("click", closeModelList);
@@ -895,6 +918,7 @@ async function onQuickModelChange() {
 async function syncQuickModelToAgent() {
     const agent = currentAgentId ? cachedAgents.find(a => a.id === currentAgentId) : null;
     const locked = !!(agent && agent.model);
+
     if (locked) {
         const wantKey = (agent.provider || "") + "|" + agent.model;
         let opt = Array.from(quickModel.options).find(o => o.value === wantKey);
@@ -924,7 +948,98 @@ async function syncQuickModelToAgent() {
         quickModel.title = "";
         Array.from(quickModel.options).filter(o => o.dataset.agentTemp === "1").forEach(o => o.remove());
     }
+    refreshQuickModelUI();
 }
+
+// ===== 自定义模型下拉：把隐藏的原生 <select> 状态映射到可见 UI =====
+const qmWrap = document.getElementById("qm-wrap");
+const qmTrigger = document.getElementById("qm-trigger");
+const qmTriggerLabel = document.getElementById("qm-trigger-label");
+const qmPanel = document.getElementById("qm-panel");
+const qmList = document.getElementById("qm-list");
+
+// 提纯模型显示名：去掉厂商前缀和括号说明，只保留一眼可辨认的关键名
+// 例："Claude/ anthropic/claude-opus-4-6" -> "claude-opus-4-6"；"OpenAI / openai/gpt-5.5" -> "gpt-5.5"
+function shortModelName(raw) {
+    if (!raw) return "";
+    let s = String(raw).replace(/\s*[（(][^）)]*[）)]\s*/g, "").trim();
+    if (s.includes("/")) {
+        const parts = s.split("/").map(p => p.trim()).filter(Boolean);
+        if (parts.length) s = parts[parts.length - 1];
+    }
+    return s.trim();
+}
+
+
+function refreshQuickModelUI() {
+    if (!qmWrap) return;
+    const opts = Array.from(quickModel.options);
+    const selected = quickModel.selectedOptions[0] || opts.find(o => o.value === quickModel.value);
+    const rawText = selected ? selected.textContent : (opts[0] ? opts[0].textContent : "");
+    qmTriggerLabel.textContent = shortModelName(rawText);
+    if (quickModel.disabled) {
+        qmWrap.classList.add("disabled");
+        closeQuickModelPanel();
+    } else {
+        qmWrap.classList.remove("disabled");
+    }
+    if (quickModel.disabled) {
+        qmTrigger.title = "";
+        qmTrigger.dataset.tooltip = quickModel.title || "";
+    } else {
+        qmTrigger.title = quickModel.title || "";
+        qmTrigger.dataset.tooltip = "";
+    }
+    renderQuickModelOptions();
+}
+
+function renderQuickModelOptions() {
+    qmList.innerHTML = "";
+    Array.from(quickModel.options).forEach(o => {
+        const item = document.createElement("div");
+        item.className = "qm-option";
+        item.textContent = shortModelName(o.textContent);
+        if (o.disabled) item.classList.add("placeholder");
+        if (o.value && o.value === quickModel.value) item.classList.add("selected");
+        if (!o.disabled) {
+            item.addEventListener("click", () => {
+                if (quickModel.value !== o.value) {
+                    quickModel.value = o.value;
+                    quickModel.dispatchEvent(new Event("change"));
+                }
+                qmTriggerLabel.textContent = shortModelName(o.textContent);
+                renderQuickModelOptions();
+                closeQuickModelPanel();
+            });
+        }
+        qmList.appendChild(item);
+    });
+}
+
+function openQuickModelPanel() {
+    if (quickModel.disabled) return;
+    renderQuickModelOptions();
+    qmWrap.classList.add("open");
+}
+function closeQuickModelPanel() {
+    if (qmWrap) qmWrap.classList.remove("open");
+}
+
+if (qmTrigger) {
+    qmTrigger.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (qmWrap.classList.contains("open")) closeQuickModelPanel();
+        else openQuickModelPanel();
+    });
+    document.addEventListener("click", (e) => {
+        if (qmWrap.classList.contains("open") && !qmWrap.contains(e.target)) closeQuickModelPanel();
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeQuickModelPanel();
+    });
+}
+
+
 
 async function openManageModels() {
     if (Object.keys(providers).length === 0) await loadProviders();
@@ -999,29 +1114,44 @@ async function onAddProviderChange() {
     }
 }
 
+let customModelsCache = [];
 async function renderCustomModelList() {
     const [customResp, activeResp] = await Promise.all([
         fetch("/api/custom-models"),
         fetch("/api/active-model")
     ]);
     const customModels = customResp.ok ? await customResp.json() : [];
+    customModelsCache = customModels;
     const active = activeResp.ok ? await activeResp.json() : {};
     customModelListEl.innerHTML = "";
     if (customModels.length === 0) {
         customModelListEl.innerHTML = '<div class="empty-hint">还没有保存任何模型配置</div>';
         return;
     }
-    customModels.forEach(m => {
+    customModels.forEach((m, idx) => {
         const isActive = m.provider === active.provider && m.model === active.model;
         const item = document.createElement("div");
         item.className = "custom-model-item" + (isActive ? " is-active" : "");
+        const fullSub = m.name ? (m.name + ' / ' + m.model) : m.model;
+        const upDisabled = idx === 0 ? ' disabled' : '';
+        const downDisabled = idx === customModels.length - 1 ? ' disabled' : '';
         item.innerHTML =
-            '<span class="model-name">' + escapeHtml(m.model) + '</span>' +
-            '<span class="model-provider">' + escapeHtml(m.name || m.provider) + '</span>' +
+            '<div class="model-item-sort">' +
+            '<button class="btn-move-model" data-dir="up" title="上移"' + upDisabled + '>▲</button>' +
+            '<button class="btn-move-model" data-dir="down" title="下移"' + downDisabled + '>▼</button>' +
+            '</div>' +
+            '<div class="model-item-text">' +
+            '<span class="model-name">' + escapeHtml(shortModelName(m.model)) + '</span>' +
+            '<span class="model-provider">' + escapeHtml(fullSub) + '</span>' +
+            '</div>' +
             '<div class="model-item-actions">' +
             '<button class="btn-edit-model" title="编辑">✎</button>' +
             '<button class="btn-remove-model" title="删除">✕</button>' +
             '</div>';
+        const btnUp = item.querySelector('.btn-move-model[data-dir="up"]');
+        const btnDown = item.querySelector('.btn-move-model[data-dir="down"]');
+        if (btnUp) btnUp.addEventListener("click", () => moveCustomModel(idx, -1));
+        if (btnDown) btnDown.addEventListener("click", () => moveCustomModel(idx, 1));
         item.querySelector(".btn-edit-model").addEventListener("click", async () => {
             await openManageModels();
             btnSaveApiConfig.dataset.fromList = "1";
@@ -1060,6 +1190,25 @@ async function renderCustomModelList() {
         });
         customModelListEl.appendChild(item);
     });
+}
+
+async function moveCustomModel(index, delta) {
+    const list = customModelsCache.slice();
+    const target = index + delta;
+    if (target < 0 || target >= list.length) return;
+    const tmp = list[index];
+    list[index] = list[target];
+    list[target] = tmp;
+    const order = list.map(m => m.provider + "|" + m.model);
+    try {
+        await fetch("/api/custom-models/reorder", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ order })
+        });
+    } catch (e) {}
+    await renderCustomModelList();
+    await buildQuickModelList();
 }
 
 
@@ -1127,6 +1276,7 @@ async function saveApiConfig() {
 let convCache = [];
 let projectsCache = [];
 let editingProjectId = null;
+let pendingKbFiles = [];
 let expandedProjects = {};
 let convSearchKeyword = "";
 
@@ -1314,23 +1464,14 @@ function renderProjects(groupedConvs, kw) {
     });
 }
 
-function openProjectModal(project) {
+async function openProjectModal(project) {
     editingProjectId = project ? project.id : null;
+    pendingKbFiles = [];
     projectPanelTitle.textContent = project ? "编辑项目" : "新建项目";
     projectName.value = project ? (project.name || "") : "";
     projectPrompt.value = project ? (project.system_prompt || "") : "";
 
-    projectProvider.innerHTML = '<option value="">使用全局模型</option>';
-    for (const [key, val] of providerEntriesCustomFirst()) {
-        const opt = document.createElement("option");
-        opt.value = key;
-        opt.textContent = val.name;
-        projectProvider.appendChild(opt);
-    }
-    projectProvider.value = project ? (project.provider || "") : "";
-    onProjectProviderChange();
-    if (project && project.model) projectModel.value = project.model;
-    projectProvider.onchange = onProjectProviderChange;
+    await buildProjectModelList(project);
 
     renderProjectKb(project);
     projectOverlay.classList.add("active");
@@ -1340,21 +1481,11 @@ function openProjectModal(project) {
 function closeProjectModal() {
     projectOverlay.classList.remove("active");
     editingProjectId = null;
+    pendingKbFiles = [];
 }
 
-function onProjectProviderChange() {
-    const key = projectProvider.value;
-    projectModel.innerHTML = '<option value="">使用全局模型</option>';
-    if (!key) return;
-    const p = providers[key];
-    if (p && p.models) {
-        p.models.forEach(m => {
-            const opt = document.createElement("option");
-            opt.value = m;
-            opt.textContent = m;
-            projectModel.appendChild(opt);
-        });
-    }
+async function buildProjectModelList(project) {
+
 }
 
 async function saveProject() {
@@ -1362,14 +1493,10 @@ async function saveProject() {
     if (!name) { showToast("请输入项目名称", "error"); return; }
     const payload = {
         name: name,
-        system_prompt: projectPrompt.value,
-        provider: projectProvider.value,
-        model: projectModel.value,
-        base_url: ""
+        system_prompt: projectPrompt.value
     };
-    if (payload.provider) {
-        const p = providers[payload.provider];
-        if (p) payload.base_url = p.base_url || "";
+    if (pendingKbFiles.length > 0) {
+        payload.files = pendingKbFiles.map(pf => ({ name: pf.name, content: pf.content }));
     }
     try {
         let resp;
@@ -1393,8 +1520,8 @@ async function saveProject() {
             await loadConversations();
             if (wasNew && saved && saved.id) {
                 editingProjectId = saved.id;
+                pendingKbFiles = [];
                 await renderProjectKb(saved);
-                btnKbUpload.disabled = false;
                 return;
             }
             closeProjectModal();
@@ -1451,16 +1578,11 @@ function renderKbItems(files) {
 }
 
 async function renderProjectKb(project) {
+    btnKbUpload.disabled = false;
     if (!project || !project.id) {
-        projectKbList.innerHTML = "";
-        const hint = document.createElement("div");
-        hint.className = "project-kb-empty";
-        hint.textContent = "保存项目后即可上传文件";
-        projectKbList.appendChild(hint);
-        btnKbUpload.disabled = true;
+        renderPendingKbItems();
         return;
     }
-    btnKbUpload.disabled = false;
     try {
         const resp = await fetch("/api/projects/" + project.id + "/files");
         const files = resp.ok ? await resp.json() : [];
@@ -1468,6 +1590,28 @@ async function renderProjectKb(project) {
     } catch (e) {
         renderKbItems([]);
     }
+}
+
+function renderPendingKbItems() {
+    projectKbList.innerHTML = "";
+    if (!pendingKbFiles || pendingKbFiles.length === 0) {
+        const hint = document.createElement("div");
+        hint.className = "project-kb-empty";
+        hint.textContent = "暂无文件，保存项目后生效";
+        projectKbList.appendChild(hint);
+        return;
+    }
+    pendingKbFiles.forEach(pf => {
+        const row = document.createElement("div");
+        row.className = "project-kb-item";
+        row.innerHTML =
+            '<span class="kb-item-name" title="' + escapeHtml(pf.name) + '">' + escapeHtml(pf.name) + '</span>' +
+            '<span class="kb-item-size">' + formatKbSize(pf.size || 0) + '</span>' +
+            '<span class="kb-item-pending">待保存</span>' +
+            '<button class="kb-item-del" title="移除">✕</button>';
+        row.querySelector(".kb-item-del").addEventListener("click", () => deleteKbFile(pf));
+        projectKbList.appendChild(row);
+    });
 }
 
 function readFileAsText(file) {
@@ -1480,31 +1624,64 @@ function readFileAsText(file) {
 }
 
 async function uploadKbFiles(fileList) {
-    if (!editingProjectId) { showToast("请先保存项目", "error"); return; }
     let okCount = 0;
+    const KB_MAX_TOTAL = 5 * 1024 * 1024;
     for (const file of fileList) {
+        if (!file) continue;
+        const fsize = file.size || 0;
+        if (fsize > 1024 * 1024) { showToast(file.name + "：超过单文件 1MB 限制", "error"); continue; }
+        let totalSize = pendingKbFiles.reduce((s, pf) => s + (pf._rawSize || 0), 0);
+        if (totalSize + fsize > KB_MAX_TOTAL) { showToast("知识库总大小不能超过 5MB", "error"); continue; }
         try {
             const content = await readFileAsText(file);
-            const resp = await fetch("/api/projects/" + editingProjectId + "/files", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name: file.name, content: content })
-            });
-            if (resp.ok) { okCount++; }
-            else {
-                const err = await resp.json().catch(() => ({}));
-                showToast((file.name || "文件") + "：" + (err.error || "上传失败"), "error");
+            if (editingProjectId) {
+                try {
+                    var existingResp = await fetch("/api/projects/" + editingProjectId + "/files");
+                    var existingFiles = existingResp.ok ? await existingResp.json() : [];
+                    var dupSaved = existingFiles.find(function(ef) { return ef.name === file.name; });
+                    if (dupSaved) { showToast(file.name + "：已存在", "info"); continue; }
+                } catch(e) {}
+                const resp = await fetch("/api/projects/" + editingProjectId + "/files", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name: file.name, content: content })
+                });
+                if (resp.ok) { okCount++; }
+                else {
+                    const err = await resp.json().catch(() => ({}));
+                    showToast((file.name || "文件") + "：" + (err.error || "上传失败"), "error");
+                }
+            } else {
+                const dup = pendingKbFiles.findIndex(pf => pf.name === file.name && pf._rawSize === file.size);
+                if (dup >= 0) { showToast(file.name + "：已存在", "info"); continue; }
+                pendingKbFiles.push({ _pendingId: Date.now() + "-" + Math.random().toString(36).slice(2, 8), name: file.name, content: content, size: content.length, _rawSize: fsize });
+                okCount++;
             }
         } catch (e) {
             showToast((file.name || "文件") + "：读取失败", "error");
         }
     }
-    if (okCount > 0) showToast("已上传 " + okCount + " 个文件", "success");
-    const proj = projectsCache.find(p => p.id === editingProjectId) || { id: editingProjectId };
-    await renderProjectKb(proj);
+    if (okCount > 0) {
+        if (editingProjectId) showToast("已上传 " + okCount + " 个文件", "success");
+        else showToast("已添加 " + okCount + " 个文件（保存项目后生效）", "success");
+    }
+    if (editingProjectId) {
+        const proj = projectsCache.find(p => p.id === editingProjectId) || { id: editingProjectId };
+        await renderProjectKb(proj);
+    } else {
+        renderPendingKbItems();
+    }
 }
 
 async function deleteKbFile(f) {
+    if (f._pendingId !== undefined) {
+        const ok = await confirmDialog("移除文件「" + (f.name || "") + "」？", { title: "移除文件", okText: "移除" });
+        if (!ok) return;
+        pendingKbFiles = pendingKbFiles.filter(pf => pf._pendingId !== f._pendingId);
+        showToast("已移除", "success");
+        renderPendingKbItems();
+        return;
+    }
     if (!editingProjectId) return;
     const ok = await confirmDialog("删除文件「" + (f.name || "") + "」？", { title: "删除文件", okText: "删除" });
     if (!ok) return;
@@ -1673,6 +1850,7 @@ async function createNewConversation(projectId) {
     if (projectId) expandedProjects[projectId] = true;
     await loadConversations();
     showWelcome();
+    updateTokenMeter(0);
     headerTitle.textContent = conv.title;
     userInput.focus();
 }
@@ -1698,6 +1876,7 @@ async function switchConversation(cid) {
     });
     const resp = await fetch("/api/conversations/" + cid + "/messages");
     const msgs = await resp.json();
+    fetchConvTokenTotal(cid);
     chatArea.innerHTML = "";
     if (typeof clearChatSearch === "function") clearChatSearch();
     if (msgs.length === 0) { showWelcome(); }
@@ -1812,6 +1991,14 @@ async function pollImageGeneration(cid) {
     while (!stopped) {
         await new Promise(r => setTimeout(r, 1200));
         if (cid !== currentConvId) { finishUI(); return; }
+        // 用户已打断（stopGeneration 清空了 generatingConvId）：立即退出轮询，
+        // 避免旧轮询把后续新消息的回复误当成本次生图结果渲染。
+        if (generatingConvId !== cid) {
+            removeImageLoading(bubble);
+            const m = bubble.closest(".message");
+            if (m) m.remove();
+            return;
+        }
         let done = false, content = null, ts = 0;
         try {
             const act = await fetch("/api/chat/active/" + cid);
@@ -1830,9 +2017,6 @@ async function pollImageGeneration(cid) {
         const hasMulti = Array.isArray(content) && content.length > 0;
         if (hasText || hasMulti) {
             const pollBubbleMsg = bubble.closest(".message");
-            chatArea.querySelectorAll(".message.ai").forEach(el => {
-                if (el !== pollBubbleMsg && el.querySelector(".msg-images")) el.remove();
-            });
             removeImageLoading(bubble);
             if (pollBubbleMsg) pollBubbleMsg.remove();
             const text = typeof content === "string" ? content : (content.find(c => c.type === "text") || {}).text || "";
@@ -1919,7 +2103,7 @@ async function attachToActiveStream(cid) {
             return;
         }
         const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
+        const decoder = new TextDecoder("utf-8");
         let buffer = "";
         while (true) {
             const { done, value } = await reader.read();
@@ -2036,7 +2220,7 @@ async function deleteConversation(cid) {
     });
     if (!ok) return;
     await fetch("/api/conversations/" + cid, { method: "DELETE" });
-    if (currentConvId === cid) { currentConvId = null; showWelcome(); headerTitle.textContent = "AI Chat"; }
+    if (currentConvId === cid) { currentConvId = null; showWelcome(); headerTitle.textContent = "AI Chat"; updateTokenMeter(0); }
     await loadConversations();
 }
 
@@ -2517,9 +2701,28 @@ const UNDO_ICON_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor
 function appendUndoButton(msgDiv, userText, images, docs, userIndex) {
     const existing = msgDiv.querySelector(".btn-undo");
     if (existing) existing.remove();
+    const existingCopy = msgDiv.querySelector(".btn-user-copy");
+    if (existingCopy) existingCopy.remove();
     if (typeof userIndex === "number") {
         msgDiv.dataset.userIndex = String(userIndex);
     }
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "btn-user-copy";
+    copyBtn.type = "button";
+    copyBtn.title = "复制这条消息";
+    copyBtn.innerHTML = COPY_ICON_SVG;
+    copyBtn.addEventListener("click", async () => {
+        const origHTML = copyBtn.innerHTML;
+        const ok = await copyToClipboard(userText != null ? String(userText) : "");
+        if (ok) {
+            copyBtn.classList.add("copied");
+            copyBtn.innerHTML = CHECK_ICON_SVG;
+            setTimeout(() => { copyBtn.classList.remove("copied"); copyBtn.innerHTML = origHTML; }, 1500);
+        } else {
+            showToast("复制失败", "error");
+        }
+    });
+    msgDiv.appendChild(copyBtn);
     const btn = document.createElement("button");
     btn.className = "btn-undo";
     btn.title = "撤回这条消息（会遗忘其后的对话，内容退回输入框）";
@@ -2592,6 +2795,7 @@ async function undoMessage(msgDiv, fallbackText, fallbackImages, fallbackDocs) {
             const data = await resp.json();
             if (typeof data.user_message === "string") serverUserMessage = data.user_message;
             if (Array.isArray(data.images)) serverImages = data.images;
+            try { await fetch("/api/chat/stop/" + currentConvId, { method: "POST" }); } catch(stopErr) {}
         }
     } catch (e) {
     }
@@ -3091,7 +3295,7 @@ async function sendMessage(presetText, opts) {
         }
 
         const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
+        const decoder = new TextDecoder("utf-8");
         let buffer = "";
 
         while (true) {
@@ -3170,6 +3374,9 @@ async function sendMessage(presetText, opts) {
                     }
                     if (parsed.ts) {
                         streamMsgTs = parsed.ts;
+                    }
+                    if (parsed.usage) {
+                        updateTokenMeter(parsed.usage.conv_total);
                     }
                 } catch {
                     fullText += data;
@@ -4040,4 +4247,103 @@ async function shareConversation(c) {
     if (!supported) {
         btnToggle.style.display = "none";
     }
+})();
+
+
+// ==================== Token 用量 ====================
+function _fmtTokens(n) {
+    n = Number(n) || 0;
+    if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(n % 1000 === 0 ? 0 : 1) + "K";
+    return n.toLocaleString("en-US");
+}
+
+function updateTokenMeter(total) {
+    const el = document.getElementById("token-meter-value");
+    if (el) el.textContent = _fmtTokens(total);
+}
+
+async function fetchConvTokenTotal(cid) {
+    if (!cid) { updateTokenMeter(0); return; }
+    try {
+        const r = await fetch("/api/conversations/" + cid + "/token-total");
+        if (!r.ok) { updateTokenMeter(0); return; }
+        const j = await r.json();
+        updateTokenMeter(j.conv_total || 0);
+    } catch (e) { updateTokenMeter(0); }
+}
+
+function _renderBarChart(container, items, opts) {
+    container.innerHTML = "";
+    const max = Math.max(1, ...items.map(it => it.value));
+    items.forEach(it => {
+        const col = document.createElement("div");
+        col.className = "token-bar-col";
+        const barWrap = document.createElement("div");
+        barWrap.className = "token-bar-wrap";
+        const bar = document.createElement("div");
+        bar.className = "token-bar";
+        const h = it.value > 0 ? Math.max(2, Math.round(it.value / max * 100)) : 0;
+        bar.style.height = h + "%";
+        if (it.highlight) bar.classList.add("token-bar-today");
+        bar.title = it.tip + "：" + (Number(it.value) || 0).toLocaleString("en-US") + " tokens";
+        barWrap.appendChild(bar);
+        const label = document.createElement("div");
+        label.className = "token-bar-label";
+        label.textContent = it.label;
+        col.appendChild(barWrap);
+        col.appendChild(label);
+        container.appendChild(col);
+    });
+}
+
+async function openTokenStats() {
+    if (typeof closeSettings === "function") closeSettings();
+    const overlay = document.getElementById("token-stats-overlay");
+    if (overlay) overlay.classList.add("active");
+    try {
+        const r = await fetch("/api/token-stats");
+        const j = await r.json();
+        document.getElementById("token-today-value").textContent =
+            (Number(j.today_total) || 0).toLocaleString("en-US");
+        document.getElementById("token-month-title").textContent =
+            j.year + "年" + j.month + "月 每日消耗";
+        document.getElementById("token-year-title").textContent =
+            j.year + "年 每月消耗";
+        const todayKey = j.today;
+        _renderBarChart(
+            document.getElementById("token-month-chart"),
+            (j.month_days || []).map(d => ({
+                value: d.total,
+                label: d.day,
+                tip: d.date,
+                highlight: d.date === todayKey
+            }))
+        );
+        _renderBarChart(
+            document.getElementById("token-year-chart"),
+            (j.year_months || []).map(m => ({
+                value: m.total,
+                label: m.month + "月",
+                tip: j.year + "年" + m.month + "月",
+                highlight: m.month === j.month
+            }))
+        );
+    } catch (e) {
+        document.getElementById("token-today-value").textContent = "0";
+    }
+}
+
+function closeTokenStats() {
+    const overlay = document.getElementById("token-stats-overlay");
+    if (overlay) overlay.classList.remove("active");
+}
+
+(function () {
+    const btnOpen = document.getElementById("btn-open-token-stats");
+    const btnClose = document.getElementById("btn-close-token-stats");
+    const overlay = document.getElementById("token-stats-overlay");
+    if (btnOpen) btnOpen.addEventListener("click", openTokenStats);
+    if (btnClose) btnClose.addEventListener("click", closeTokenStats);
+    if (overlay) overlay.addEventListener("click", e => { if (e.target === overlay) closeTokenStats(); });
 })();

@@ -14,7 +14,7 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-from chat_core import load_api_key, load_system_prompt, HistoryManager, send_chat_request, parse_stream_chunk, parse_stream_chunk_full, build_request_payload
+from chat_core import load_api_key, load_system_prompt, HistoryManager, send_chat_request, parse_stream_chunk, parse_stream_chunk_full, build_request_payload, parse_stream_usage
 import requests
 import re
 import csv
@@ -29,6 +29,7 @@ APIKEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".apikey"
 AGENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agents.json")
 CONVERSATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conversations.json")
 PROJECTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects.json")
+TOKEN_STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "token_stats.json")
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "uploads")
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "svg"}
 # =============================================================
@@ -131,6 +132,7 @@ def _request_image_generation(chat_cfg, messages):
 
 app = Flask(__name__)
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+app.config["JSON_AS_ASCII"] = False
 APP_START_TIME = str(int(time.time()))
 
 @app.context_processor
@@ -329,6 +331,64 @@ def _get_conv_lock(cid):
             lock = threading.Lock()
             _conv_locks[cid] = lock
         return lock
+
+
+import datetime as _dt
+
+_token_stats_lock = threading.Lock()
+
+
+def _load_token_stats():
+    try:
+        with open(TOKEN_STATS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("daily"), dict):
+            return data
+    except Exception:
+        pass
+    return {"daily": {}}
+
+
+def _save_token_stats(data):
+    try:
+        tmp = TOKEN_STATS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, TOKEN_STATS_FILE)
+    except Exception:
+        pass
+
+
+def _record_token_usage(usage):
+    if not usage:
+        return
+    total = int(usage.get("total_tokens") or 0)
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    if total <= 0:
+        total = prompt + completion
+    if total <= 0:
+        return
+    day = _dt.date.today().isoformat()
+    with _token_stats_lock:
+        data = _load_token_stats()
+        d = data["daily"].get(day) or {"total": 0, "prompt": 0, "completion": 0}
+        d["total"] += total
+        d["prompt"] += prompt
+        d["completion"] += completion
+        data["daily"][day] = d
+        _save_token_stats(data)
+
+
+def _conv_token_total(conv):
+    t = 0
+    for m in conv.get("history", []):
+        u = m.get("usage")
+        if isinstance(u, dict):
+            t += int(u.get("total_tokens") or 0)
+    return t
 
 
 def _save_conversations():
@@ -960,6 +1020,29 @@ def update_custom_model():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/custom-models/reorder", methods=["POST"])
+def reorder_custom_models():
+    data = request.get_json() or {}
+    order = data.get("order", [])
+    if not isinstance(order, list):
+        return jsonify({"error": "order 必须是列表"}), 400
+    models = runtime_config.get("custom_models", [])
+    index_map = {(m["provider"] + "|" + m["model"]): m for m in models}
+    reordered = []
+    for key in order:
+        m = index_map.pop(key, None)
+        if m is not None:
+            reordered.append(m)
+    for m in models:
+        k = m["provider"] + "|" + m["model"]
+        if k in index_map:
+            reordered.append(m)
+            index_map.pop(k, None)
+    runtime_config["custom_models"] = reordered
+    _save_config(runtime_config)
+    return jsonify({"status": "ok"})
+
+
 # ==================== 智能体 API ====================
 
 @app.route("/api/agents", methods=["GET"])
@@ -1167,14 +1250,20 @@ def list_projects():
 def create_project():
     data = request.get_json() or {}
     name = (data.get("name") or "").strip() or "新项目"
+    raw_files = data.get("files") or []
+    saved_files = []
+    for rf in raw_files:
+        if not isinstance(rf, dict): continue
+        fname = (rf.get("name") or "未命名.txt").strip()[:120]
+        fcontent = rf.get("content") or ""
+        if not fcontent.strip(): continue
+        if len(fcontent.encode("utf-8")) > PROJECT_FILE_MAX_BYTES: continue
+        saved_files.append({"id": str(uuid.uuid4())[:8], "name": fname, "content": fcontent})
     project = {
         "id": str(uuid.uuid4())[:8],
         "name": name[:50],
         "system_prompt": data.get("system_prompt", ""),
-        "provider": data.get("provider", ""),
-        "model": data.get("model", ""),
-        "base_url": data.get("base_url", ""),
-        "files": [],
+        "files": saved_files,
         "created": time.time(),
         "updated": time.time()
     }
@@ -1197,8 +1286,17 @@ def update_project(project_id):
         project["provider"] = data["provider"]
     if "model" in data:
         project["model"] = data["model"]
-    if "base_url" in data:
-        project["base_url"] = data["base_url"]
+    if "files" in data and isinstance(data["files"], list):
+        raw_files = data["files"]
+        saved_files = []
+        for rf in raw_files:
+            if not isinstance(rf, dict): continue
+            fname = (rf.get("name") or "未命名.txt").strip()[:120]
+            fcontent = rf.get("content") or ""
+            if not fcontent.strip(): continue
+            if len(fcontent.encode("utf-8")) > PROJECT_FILE_MAX_BYTES: continue
+            saved_files.append({"id": str(uuid.uuid4())[:8], "name": fname, "content": fcontent})
+        project["files"] = saved_files
     project["updated"] = time.time()
     _save_projects(projects_list)
     return jsonify(project)
@@ -1369,6 +1467,63 @@ def get_messages(cid):
         return jsonify({"error": "对话不存在"}), 404
     msgs = [m for m in conv["history"] if m["role"] != "system"]
     return jsonify(msgs)
+
+
+@app.route("/api/conversations/<cid>/token-total", methods=["GET"])
+def get_conv_token_total(cid):
+    conv = _get_conv(cid)
+    if not conv:
+        return jsonify({"error": "对话不存在"}), 404
+    return jsonify({"conv_total": _conv_token_total(conv)})
+
+
+@app.route("/api/token-stats", methods=["GET"])
+def get_token_stats():
+    with _token_stats_lock:
+        data = _load_token_stats()
+    daily = data.get("daily", {})
+    today = _dt.date.today()
+    today_key = today.isoformat()
+    today_total = int((daily.get(today_key) or {}).get("total") or 0)
+
+    # 当月每天
+    first = today.replace(day=1)
+    if today.month == 12:
+        nxt = today.replace(year=today.year + 1, month=1, day=1)
+    else:
+        nxt = today.replace(month=today.month + 1, day=1)
+    days_in_month = (nxt - first).days
+    month_days = []
+    for i in range(days_in_month):
+        d = first + _dt.timedelta(days=i)
+        k = d.isoformat()
+        month_days.append({
+            "date": k,
+            "day": d.day,
+            "total": int((daily.get(k) or {}).get("total") or 0)
+        })
+
+    # 当年每月
+    year_months = []
+    for m in range(1, 13):
+        msum = 0
+        for k, v in daily.items():
+            try:
+                dd = _dt.date.fromisoformat(k)
+            except Exception:
+                continue
+            if dd.year == today.year and dd.month == m:
+                msum += int((v or {}).get("total") or 0)
+        year_months.append({"month": m, "total": msum})
+
+    return jsonify({
+        "today": today_key,
+        "today_total": today_total,
+        "month_days": month_days,
+        "year_months": year_months,
+        "year": today.year,
+        "month": today.month
+    })
 
 
 @app.route("/api/conversations/<cid>/agent", methods=["PUT"])
@@ -1597,18 +1752,43 @@ def chat():
                     yield f"data: {st}\n\n"
             if _is_image_model(chat_cfg["model"]):
                 stream_state["request_sent"] = True
-                yield "data: " + json.dumps({"image_loading": True}, ensure_ascii=False) + "\n\n"
-                try:
-                    img_resp = _request_image_generation(
-                        chat_cfg,
-                        _inject_search(_build_request_history(), search_result)
-                    )
-                except Exception as e:
+                if stream_state["cancel"].is_set():
                     mgr.rollback_user_message()
                     stream_state["saved"] = True
-                    err = json.dumps({"error": "生图请求失败：" + str(e)[:200]}, ensure_ascii=False)
+                    return
+                yield "data: " + json.dumps({"image_loading": True}, ensure_ascii=False) + "\n\n"
+                # 生图是阻塞式同步请求，放入子线程并可被中断等待：
+                # 用户打断后无需等同步请求返回即可立即结束本次生成、释放对话锁。
+                _img_box = {}
+
+                def _img_worker():
+                    try:
+                        _img_box["resp"] = _request_image_generation(
+                            chat_cfg,
+                            _inject_search(_build_request_history(), search_result)
+                        )
+                    except Exception as _e:
+                        _img_box["err"] = _e
+
+                _img_thread = threading.Thread(target=_img_worker, daemon=True)
+                _img_thread.start()
+                while _img_thread.is_alive():
+                    if stream_state["cancel"].is_set():
+                        mgr.rollback_user_message()
+                        stream_state["saved"] = True
+                        return
+                    _img_thread.join(timeout=0.3)
+                if stream_state["cancel"].is_set():
+                    mgr.rollback_user_message()
+                    stream_state["saved"] = True
+                    return
+                if "err" in _img_box:
+                    mgr.rollback_user_message()
+                    stream_state["saved"] = True
+                    err = json.dumps({"error": "生图请求失败：" + str(_img_box["err"])[:200]}, ensure_ascii=False)
                     yield f"data: {err}\n\n"
                     return
+                img_resp = _img_box["resp"]
                 if img_resp.status_code != 200:
                     mgr.rollback_user_message()
                     stream_state["saved"] = True
@@ -1716,9 +1896,13 @@ def chat():
             history.append({"role": "assistant", "content": ""})
             reasoning_buf = ""
             in_reasoning = False
+            turn_usage = None
             for line in resp.iter_lines(decode_unicode=True):
                 if stream_state["cancel"].is_set():
                     break
+                _u = parse_stream_usage(line)
+                if _u:
+                    turn_usage = _u
                 result = parse_stream_chunk_full(line)
                 if result is None:
                     break
@@ -1779,6 +1963,15 @@ def chat():
             conv["updated"] = time.time()
             if history and history[-1].get("role") == "assistant":
                 history[-1]["ts"] = int(time.time())
+                if turn_usage:
+                    history[-1]["usage"] = turn_usage
+            if turn_usage:
+                _record_token_usage(turn_usage)
+                usage_data = json.dumps({"usage": {
+                    "turn": turn_usage,
+                    "conv_total": _conv_token_total(conv)
+                }}, ensure_ascii=False)
+                yield f"data: {usage_data}\n\n"
             stream_state["saved"] = True
             _save_conversations()
             ts_data = json.dumps({"ts": int(time.time())}, ensure_ascii=False)
@@ -1829,7 +2022,7 @@ def chat():
         for ev in _observe_active_stream(active):
             yield ev
 
-    resp = Response(stream_with_context(observe()), mimetype="text/event-stream")
+    resp = Response(stream_with_context(observe()), mimetype="text/event-stream; charset=utf-8")
     return resp
 
 
@@ -1843,7 +2036,7 @@ def chat_attach(cid):
         for ev in _observe_active_stream(st):
             yield ev
 
-    resp = Response(stream_with_context(observe()), mimetype="text/event-stream")
+    resp = Response(stream_with_context(observe()), mimetype="text/event-stream; charset=utf-8")
     return resp
 
 
@@ -1922,6 +2115,10 @@ def undo_conversation(cid):
     if not lock.acquire(blocking=False):
         return jsonify({"error": "当前对话正在生成回复，请等待完成后再操作", "busy": True}), 409
     try:
+        st = _get_active_stream(cid)
+        if st:
+            st["cancel"].set()
+            _finish_active_stream(cid, st)
         data = request.get_json() or {}
 
         history = conv["history"]
