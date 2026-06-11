@@ -2,6 +2,7 @@ import os
 import re
 import json
 import subprocess
+import signal
 import fnmatch
 import time
 import difflib
@@ -146,7 +147,7 @@ TOOLS_DEFINITION = [
         "type": "function",
         "function": {
             "name": "call_agent",
-            "description": "调用另一个智能体执行子任务。被调用的智能体会独立完成任务并返回结果。适用于需要其他专业智能体协作的场景。",
+            "description": "调用另一个智能体执行子任务。被调用的智能体会独立完成任务并返回结果。重要：调用时应将复杂任务拆解为明确的单步指令，不要一次性发送过大的需求，否则子智能体可能因处理时间过长而超时失败。message 中应明确说明要做什么、操作哪个文件、期望的结果。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -233,12 +234,16 @@ class ToolExecutor:
     def _confirm(self, action_desc):
         if self.permission >= 3 or self.auto_confirm:
             return True
+        from .terminal_control import stop_abort_listener, start_abort_listener
+        stop_abort_listener()
         try:
             answer = input(f"\n⚠️  {action_desc}\n   确认执行？(y/n): ").strip().lower()
             return answer in ("y", "yes")
         except (EOFError, KeyboardInterrupt):
             print("\n已取消")
             return False
+        finally:
+            start_abort_listener()
 
     def execute(self, tool_name, arguments):
         try:
@@ -363,6 +368,8 @@ class ToolExecutor:
 
     def _edit_file(self, args):
         action = args.get("action", "write")
+        if "path" not in args:
+            return "[错误] edit_file 缺少必需参数 'path'"
         path = self._resolve_path(args["path"])
 
         if action == "delete":
@@ -629,26 +636,84 @@ class ToolExecutor:
             return "[已取消] 用户拒绝了命令执行"
 
         try:
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
-                timeout=timeout, cwd=self.work_dir
-            )
-            output = ""
-            if result.stdout:
-                output += result.stdout
-            if result.stderr:
-                output += "\n[stderr]\n" + result.stderr
-            if result.returncode != 0:
-                output += f"\n[退出码: {result.returncode}]"
-            if not output.strip():
-                output = "[命令执行成功，无输出]"
-            if len(output) > self.config.get("命令输出最大字符数", 10000):
-                output = output[:self.config.get("命令输出最大字符数", 10000)] + "\n... (输出已截断)"
-            return output
-        except subprocess.TimeoutExpired:
-            return f"[错误] 命令超时 ({timeout}秒)"
+            from .terminal_control import get_abort_flag
+        except Exception:
+            get_abort_flag = lambda: False
+
+        is_posix = (os.name == "posix")
+        popen_kwargs = dict(
+            shell=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=self.work_dir,
+        )
+        if is_posix:
+            popen_kwargs["start_new_session"] = True
+        else:
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+        def _kill(proc):
+            try:
+                if is_posix:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                else:
+                    proc.kill()
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+        try:
+            proc = subprocess.Popen(command, **popen_kwargs)
         except Exception as e:
             return f"[错误] 执行失败: {e}"
+
+        aborted = False
+        deadline = time.time() + timeout
+        while True:
+            if proc.poll() is not None:
+                break
+            if get_abort_flag():
+                _kill(proc)
+                aborted = True
+                break
+            if time.time() > deadline:
+                _kill(proc)
+                try:
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+                return f"[错误] 命令超时 ({timeout}秒)"
+            time.sleep(0.05)
+
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except Exception:
+            _kill(proc)
+            stdout, stderr = "", ""
+
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+
+        if aborted:
+            return "[已中断] 用户中断了命令执行"
+
+        output = ""
+        if stdout:
+            output += stdout
+        if stderr:
+            output += "\n[stderr]\n" + stderr
+        if proc.returncode != 0:
+            output += f"\n[退出码: {proc.returncode}]"
+        if not output.strip():
+            output = "[命令执行成功，无输出]"
+        if len(output) > self.config.get("命令输出最大字符数", 10000):
+            output = output[:self.config.get("命令输出最大字符数", 10000)] + "\n... (输出已截断)"
+        return output
 
     def _list_dir(self, args):
         path = self._resolve_path(args.get("path", "."))

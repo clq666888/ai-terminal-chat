@@ -11,12 +11,17 @@ class Spinner:
         self._stop = threading.Event()
         self._thread = None
         self._started = False
+        self._start_time = 0
 
     def start(self):
         self._stop.clear()
         self._started = True
+        self._start_time = time.time()
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._thread.start()
+
+    def reset_time(self):
+        self._start_time = time.time()
 
     def stop(self):
         if not self._started:
@@ -32,8 +37,16 @@ class Spinner:
     def _spin(self):
         i = 0
         while not self._stop.is_set():
+            from . import terminal_control as _tc
+            if _tc.get_abort_flag():
+                break
             frame = self.FRAMES[i % len(self.FRAMES)]
-            sys.stdout.write(f"\r\033[K{frame} {self.message}...")
+            elapsed = time.time() - self._start_time
+            if elapsed >= 3:
+                time_str = f" ({int(elapsed)}s)"
+            else:
+                time_str = ""
+            sys.stdout.write(f"\r\033[K{frame} {self.message}{time_str}...")
             sys.stdout.flush()
             time.sleep(0.08)
             i += 1

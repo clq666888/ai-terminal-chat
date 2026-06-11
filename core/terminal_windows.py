@@ -1,13 +1,44 @@
 import sys
 import threading
 import time
+import ctypes
 import msvcrt
 
-from chat_core import parse_stream_chunk
+from .chat_core import parse_stream_chunk
 
 generating = False
 abort_flag = False
 listener_stop = threading.Event()
+_abort_callback = None
+_main_thread_id = threading.main_thread().ident
+
+
+class AbortInterrupt(BaseException):
+    pass
+
+
+def set_abort_callback(cb):
+    global _abort_callback
+    _abort_callback = cb
+
+
+def clear_abort_callback():
+    global _abort_callback
+    _abort_callback = None
+
+
+def _inject_abort_to_main():
+    try:
+        ret = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(_main_thread_id),
+            ctypes.py_object(AbortInterrupt)
+        )
+        if ret > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(_main_thread_id), None
+            )
+    except Exception:
+        pass
 
 
 def _key_listener():
@@ -19,15 +50,21 @@ def _key_listener():
 
         ch = msvcrt.getch()
 
-        if not generating:
-            continue
-
         if ch == b'\x11':
             abort_flag = True
             generating = False
-            sys.stdout.write("\n\n🛑 已中断生成")
+            if _abort_callback:
+                try:
+                    _abort_callback()
+                except Exception:
+                    pass
+            _inject_abort_to_main()
+            sys.stdout.write("\n\n\U0001f6d1 已中断生成")
             sys.stdout.flush()
             break
+
+        if not generating:
+            continue
 
 
 def start_abort_listener():
@@ -51,7 +88,6 @@ def stop_abort_listener():
 def pause_listener():
     global generating
     generating = False
-    listener_stop.set()
 
 
 def resume_listener():
@@ -59,9 +95,6 @@ def resume_listener():
     if abort_flag:
         return
     generating = True
-    listener_stop.clear()
-    t = threading.Thread(target=_key_listener, daemon=True)
-    t.start()
 
 
 def is_aborted():

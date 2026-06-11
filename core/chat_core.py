@@ -26,7 +26,7 @@ def load_system_prompt(file_path):
         return None
 
 
-def build_request_payload(api_key, messages, model, temperature=0.7, stream=True, tools=None):
+def build_request_payload(api_key, messages, model, temperature=0.7, stream=True, tools=None, max_tokens=None):
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
@@ -37,6 +37,8 @@ def build_request_payload(api_key, messages, model, temperature=0.7, stream=True
         "temperature": temperature,
         "stream": stream
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -195,50 +197,99 @@ def parse_stream_chunk(line):
 
 
 
-def parse_stream_response(response):
+def parse_stream_response(response, abort_check=None):
+    import socket as _socket
     collected_content = ""
     tool_calls_map = {}
     finish_reason = None
 
-    for line in response.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data: "):
-            continue
-        data_str = line[6:]
-        if data_str == "[DONE]":
-            break
-        try:
-            chunk = json.loads(data_str)
-        except Exception:
-            continue
+    try:
+        raw_sock = response.raw._fp.fp.raw
+        raw_sock.settimeout(0.5)
+    except Exception:
+        raw_sock = None
 
-        if not chunk.get("choices"):
-            continue
-        choice = chunk["choices"][0]
-        delta = choice.get("delta", {})
-        finish_reason = choice.get("finish_reason") or finish_reason
+    buf = ""
+    done = False
 
-        content = delta.get("content") or delta.get("reasoning_content") or ""
-        if content:
-            collected_content += content
-            yield ("content", content)
+    def _read_chunks():
+        while True:
+            if abort_check and abort_check():
+                return
+            try:
+                chunk = response.raw.read(4096, decode_content=True)
+                if not chunk:
+                    return
+                yield chunk
+            except _socket.timeout:
+                if abort_check and abort_check():
+                    return
+                continue
+            except Exception:
+                return
 
-        if delta.get("tool_calls"):
-            for tc_delta in delta["tool_calls"]:
-                idx = tc_delta["index"]
-                if idx not in tool_calls_map:
-                    tool_calls_map[idx] = {
-                        "id": tc_delta.get("id", ""),
-                        "type": "function",
-                        "function": {"name": "", "arguments": ""}
-                    }
-                tc = tool_calls_map[idx]
-                if tc_delta.get("id"):
-                    tc["id"] = tc_delta["id"]
-                fn = tc_delta.get("function", {})
-                if fn.get("name"):
-                    tc["function"]["name"] = fn["name"]
-                if fn.get("arguments"):
-                    tc["function"]["arguments"] += fn["arguments"]
+    try:
+        for raw_bytes in _read_chunks():
+            if abort_check and abort_check():
+                break
+            text = raw_bytes if isinstance(raw_bytes, str) else raw_bytes.decode("utf-8", errors="replace")
+            buf += text
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line or not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str == "[DONE]":
+                    done = True
+                    break
+                try:
+                    data = json.loads(data_str)
+                except Exception:
+                    continue
+
+                if not data.get("choices"):
+                    continue
+                choice = data["choices"][0]
+                delta = choice.get("delta", {})
+                finish_reason = choice.get("finish_reason") or finish_reason
+
+                content = delta.get("content") or delta.get("reasoning_content") or ""
+                if content:
+                    collected_content += content
+                    yield ("content", content)
+
+                if delta.get("tool_calls"):
+                    for tc_delta in delta["tool_calls"]:
+                        idx = tc_delta["index"]
+                        if idx not in tool_calls_map:
+                            tool_calls_map[idx] = {
+                                "id": tc_delta.get("id", ""),
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""}
+                            }
+                        tc = tool_calls_map[idx]
+                        if tc_delta.get("id"):
+                            tc["id"] = tc_delta["id"]
+                        fn = tc_delta.get("function", {})
+                        if fn.get("name"):
+                            tc["function"]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            tc["function"]["arguments"] += fn["arguments"]
+                    for tc_delta_item in delta["tool_calls"]:
+                        tc_idx = tc_delta_item["index"]
+                        tc_fn = tc_delta_item.get("function", {})
+                        tc_name = tool_calls_map[tc_idx]["function"]["name"] if tc_idx in tool_calls_map else ""
+                        tc_args_delta = tc_fn.get("arguments", "")
+                        tc_total_len = len(tool_calls_map[tc_idx]["function"]["arguments"]) if tc_idx in tool_calls_map else 0
+                        yield ("tool_receiving", tc_name, tc_total_len, tc_args_delta, tc_idx)
+            if done:
+                break
+    except Exception:
+        pass
+
+    if abort_check and abort_check():
+        return
 
     if tool_calls_map:
         tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())]
@@ -253,9 +304,9 @@ def _normalize_base_url(base_url):
     return url
 
 
-def send_chat_request(base_url, api_key, messages, model, temperature=0.7, tools=None, stream=True, connect_timeout=10, read_timeout=120):
+def send_chat_request(base_url, api_key, messages, model, temperature=0.7, tools=None, stream=True, connect_timeout=10, read_timeout=120, max_tokens=None):
     url = _normalize_base_url(base_url)
-    headers, payload = build_request_payload(api_key, messages, model, temperature, stream=stream, tools=tools)
+    headers, payload = build_request_payload(api_key, messages, model, temperature, stream=stream, tools=tools, max_tokens=max_tokens)
     if stream:
         resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=(connect_timeout, read_timeout))
         resp.encoding = "utf-8"

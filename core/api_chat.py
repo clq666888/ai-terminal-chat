@@ -4,51 +4,48 @@ import os
 import json
 import requests
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+if sys.platform != "win32":
+    import readline
+else:
+    os.system("chcp 65001 >nul 2>&1")
+    def _win_ctrl_handler(ctrl_type):
+        if ctrl_type == 0:
+            try:
+                sys.stdout.write('\n再见！\n')
+                sys.stdout.flush()
+            except Exception:
+                pass
+            os._exit(0)
+        return False
+    try:
+        import ctypes
+        _HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+        _ctrl_cb = _HandlerRoutine(_win_ctrl_handler)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_cb, True)
+    except Exception:
+        import signal
+        signal.signal(signal.SIGINT, lambda *_: os._exit(0))
 
-def _win_ctrl_handler(ctrl_type):
-    if ctrl_type == 0:
-        try:
-            sys.stdout.write('\n再见！\n')
-            sys.stdout.flush()
-        except Exception:
-            pass
-        os._exit(0)
-    return False
-
-
-try:
-    import ctypes
-    _HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
-    _ctrl_cb = _HandlerRoutine(_win_ctrl_handler)
-    ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_cb, True)
-except Exception:
-    import signal
-    signal.signal(signal.SIGINT, lambda *_: os._exit(0))
-
-from chat_core import (
+from .chat_core import (
     load_api_key, load_system_prompt, HistoryManager,
     send_chat_request, parse_stream_chunk, parse_stream_response
 )
-from terminal_control import TerminalManager, stream_output, start_abort_listener, stop_abort_listener, is_aborted, pause_listener, resume_listener
-from tools import TOOLS_DEFINITION, ToolExecutor
-from spinner import Spinner
-from agent_manager import (
+from .terminal_control import (
+    TerminalManager, stream_output, start_abort_listener,
+    stop_abort_listener, is_aborted, pause_listener, resume_listener,
+    set_abort_callback, clear_abort_callback, AbortInterrupt
+)
+from .spinner import Spinner
+from .tools import TOOLS_DEFINITION, ToolExecutor
+from .agent_manager import (
     list_agents, get_agent, get_global_agent,
     filter_tools, print_agent_list
 )
-
-import sys as _sys
-_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _parent not in _sys.path:
-    _sys.path.insert(0, _parent)
-from config_manager import load_config, load_project_context, get_sessions_dir
-
-_mcp_dir = os.path.join(_parent, "mcp")
-if _mcp_dir not in _sys.path:
-    _sys.path.insert(0, _mcp_dir)
-from mcp_client import get_mcp_manager
+from .config_manager import load_config, load_project_context, get_sessions_dir
+from .mcp_client import get_mcp_manager
 
 _cfg = load_config()
 
@@ -76,8 +73,10 @@ TOOL_RULES = """
 6. 当你需要向用户提问、确认方案、或获取补充信息时，必须调用 ask_user 工具，禁止在回复文本中直接写问题等待用户回答。ask_user 的结果会立即返回给你，你可以基于用户的回答继续执行后续操作，整个过程不会中断当前任务
 7. 当用户询问你之前对文件做了什么改动、某个文件的修改历史、或需要你回顾自己的操作时，使用 get_diff 工具查询，不要凭记忆猜测
 8. 优先使用工具获取准确信息，不要在没有依据的情况下猜测文件内容或改动情况
-9. 你只有上面列出的工具能力，没有任何其他能力（没有联网搜索、没有知识图谱、没有长期记忆存储）。不要向用户声称你拥有未列出的功能
-10. 当前运行环境是 Windows，执行命令时使用 Windows 语法"""
+9. 你只有上面列出的工具能力，没有任何其他能力（没有联网搜索、没有知识图谱、没有长期记忆存储）。不要向用户声称你拥有未列出的功能"""
+
+if sys.platform == "win32":
+    TOOL_RULES += "\n10. 当前运行环境是 Windows，执行命令时使用 Windows 语法"
 
 PARALLEL_SAFE_TOOLS = {"read_file", "list_dir", "search_files"}
 _print_lock = threading.Lock()
@@ -85,7 +84,7 @@ _print_lock = threading.Lock()
 TOOL_DESC_MAP = {
     "read_file": "读取文件内容",
     "edit_file": "编辑文件（写入/局部修改/删除）",
-    "run_command": "执行命令",
+    "run_command": "执行命令" if sys.platform == "win32" else "执行 shell 命令",
     "list_dir": "列出目录结构",
     "search_files": "在文件中搜索文本",
     "call_agent": "调用其他智能体执行子任务",
@@ -103,8 +102,6 @@ TOOL_DISPLAY_MAP = {
     "ask_user": "用户提问",
     "get_diff": "查看改动",
 }
-
-os.system("chcp 65001 >nul 2>&1")
 
 global_agent = get_global_agent()
 if not global_agent:
@@ -214,54 +211,428 @@ def run_sub_agent(agent_id, message):
     sub_tool_names = [t["function"]["name"] for t in sub_tools_def]
     sub_tool_lines = "\n".join(f"- {name}: {TOOL_DESC_MAP.get(name, name)}" for name in sub_tool_names)
     sub_system = (target["system_prompt"] or "") + TOOL_RULES.format(tool_list=sub_tool_lines, work_dir=WORK_DIR)
+    SUB_AGENT_PROMPT = """
+
+你当前是被主智能体通过 call_agent 工具调用的子智能体，负责完成主智能体分配的具体子任务。
+
+【你的身份】
+- 你不是直接面对最终用户的助手，而是主智能体的执行单元
+- 主智能体通过 message 给你明确的任务指令，你只需完成该任务并返回结果
+- 你的输出会被主智能体接收并整合，因此要简洁、准确、可直接使用
+
+【语言要求 - 强制】
+- 全程使用中文回复，包括思考过程、计划和总结，禁止输出英文句子或段落（代码中的变量名、函数名等标识符除外）
+
+【超时约束】
+- 每一轮思考+响应必须在 60 秒内产出内容，否则会被强制中断
+
+【执行原则】
+1. 收到任务后立即用工具获取必要信息（如 read_file、list_dir），不要先输出长篇分析或执行计划
+2. 了解现状后直接动手，边做边用一两句话简短说明，禁止动手前罗列大段步骤
+3. 写代码时尽量一次写好主体；如果需要修改已有文件，优先用 patch 模式做局部修补，避免整体重写
+4. 不编造文件内容、命令输出或 API 返回，一切信息必须来自工具调用的真实结果
+5. 不要声称执行了未实际执行的操作
+6. 如果任务描述有歧义或关键信息缺失，直接说明需要什么信息
+
+【输出要求】
+- 任务完成后直接输出结果，不要输出无关寒暄
+- 如果任务是写代码，确保代码完整可运行
+- 如果任务是分析/检查，给出明确结论和依据"""
+    sub_system += SUB_AGENT_PROMPT
 
     sub_history = [
         {"role": "system", "content": sub_system},
         {"role": "user", "content": message}
     ]
 
+    SUB_IDLE_TIMEOUT = 60
+    sub_spinner = Spinner(f"@{agent_id} 工作中")
+    sub_spinner.start()
 
     for round_num in range(MAX_TOOL_ROUNDS):
+        if not sub_spinner._started:
+            sub_spinner.message = f"@{agent_id} 工作中"
+            sub_spinner.start()
         try:
             resp = send_chat_request(
                 sub_api_url, sub_api_key, sub_history, sub_model,
-                temperature=sub_temp, tools=sub_tools_def, stream=False,
-                connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"]
+                temperature=sub_temp, tools=sub_tools_def, stream=True,
+                connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"],
+                max_tokens=16384
             )
         except Exception as e:
+            sub_spinner.stop()
             return f"[错误] 子智能体请求失败: {e}"
 
         if resp.status_code != 200:
-            return f"[错误] 子智能体请求失败 [{resp.status_code}]"
+            sub_spinner.stop()
+            try:
+                err_text = resp.text[:200]
+            except Exception:
+                err_text = ""
+            return f"[错误] 子智能体请求失败 [{resp.status_code}]: {err_text}"
 
-        data = resp.json()
-        msg = data["choices"][0]["message"]
-        finish_reason = data["choices"][0].get("finish_reason", "")
+        collected_content = ""
+        tool_calls_map = {}
+        finish_reason = None
+        _last_data_time = time.time()
+        timed_out = False
+        _sub_header_printed = False
+        _ssw_buf = ""
+        _ssw_phase = "init"
+        _ssw_path = None
+        _ssw_file = None
+        _ssw_lines = 0
+        _ssw_written = 0
+        _ssw_done = False
+        _ssw_old_content = ""
+        _ssw_idx = None
+        _ssw_done_paths = {}
 
-        if finish_reason == "tool_calls" or msg.get("tool_calls"):
-            tool_calls = msg["tool_calls"]
+        sub_aborted = False
+
+        def _sub_abort_check():
+            from . import terminal_control as _tc
+            if _tc.get_abort_flag():
+                return True
+            return (time.time() - _last_data_time) > SUB_IDLE_TIMEOUT
+
+        try:
+            from . import terminal_control as _tc
+            for event in parse_stream_response(resp, abort_check=_sub_abort_check):
+                if _tc.get_abort_flag():
+                    sub_aborted = True
+                    break
+                _last_data_time = time.time()
+                sub_spinner.reset_time()
+                if event[0] == "content":
+                    if not _sub_header_printed:
+                        sub_spinner.stop()
+                        sys.stdout.write(f"\n  @{agent_id}: ")
+                        sys.stdout.flush()
+                        _sub_header_printed = True
+                    sys.stdout.write(event[1])
+                    sys.stdout.flush()
+                    collected_content += event[1]
+                elif event[0] == "tool_receiving":
+                    tool_name = event[1]
+                    args_delta = event[3] if len(event) > 3 else ""
+                    tc_idx = event[4] if len(event) > 4 else 0
+                    _is_write = tool_name in ("edit_file",)
+                    if not _is_write:
+                        if not sub_spinner._started and not _sub_header_printed:
+                            sub_spinner.message = f"@{agent_id} 工作中"
+                            sub_spinner.start()
+                        continue
+                    if _ssw_done:
+                        if _ssw_idx is not None and tc_idx == _ssw_idx:
+                            continue
+                        _ssw_done = False
+                        _ssw_buf = ""
+                        _ssw_phase = "init"
+                        _ssw_path = None
+                        _ssw_lines = 0
+                        _ssw_written = 0
+                        _ssw_old_content = ""
+                        _ssw_idx = tc_idx
+                    if _ssw_idx is None:
+                        _ssw_idx = tc_idx
+                    if tc_idx != _ssw_idx:
+                        continue
+                    _ssw_buf += args_delta
+                    if _ssw_phase in ("init", "scanning"):
+                        if _ssw_phase == "init":
+                            if '"action"' in _ssw_buf:
+                                if '"patch"' in _ssw_buf or '"delete"' in _ssw_buf:
+                                    _ssw_phase = "not_write"
+                                    continue
+                                elif '"write"' in _ssw_buf:
+                                    _ssw_phase = "scanning"
+                                else:
+                                    continue
+                            else:
+                                continue
+                        if _ssw_phase == "scanning":
+                            if not _ssw_path:
+                                for pm in ['"path": "', '"path":"']:
+                                    pi = _ssw_buf.find(pm)
+                                    if pi >= 0:
+                                        pe = _ssw_buf.find('"', pi + len(pm))
+                                        if pe >= 0:
+                                            _ssw_path = _ssw_buf[pi + len(pm):pe]
+                                            break
+                            content_pos = -1
+                            for cm in ['"content": "', '"content":"']:
+                                ci = _ssw_buf.find(cm)
+                                if ci >= 0:
+                                    content_pos = ci + len(cm)
+                                    break
+                            if _ssw_path and content_pos >= 0:
+                                _ssw_phase = "streaming"
+                                _ssw_buf = _ssw_buf[content_pos:]
+                                sub_spinner.stop()
+                                if _sub_header_printed:
+                                    sys.stdout.write("\n")
+                                    _sub_header_printed = False
+                                abs_path = os.path.join(WORK_DIR, _ssw_path) if not os.path.isabs(_ssw_path) else _ssw_path
+                                parent_dir = os.path.dirname(abs_path) or "."
+                                os.makedirs(parent_dir, exist_ok=True)
+                                if os.path.isfile(abs_path):
+                                    try:
+                                        with open(abs_path, "r", encoding="utf-8", errors="replace") as _of:
+                                            _ssw_old_content = _of.read()
+                                    except Exception:
+                                        pass
+                                _ssw_file = open(abs_path, "w", encoding="utf-8")
+                                sys.stdout.write(f"    ✏️  写入: {_ssw_path} ")
+                                sys.stdout.flush()
+                            else:
+                                continue
+                    if _ssw_phase == "not_write":
+                        continue
+                    if _ssw_phase == "streaming":
+                        out = ""
+                        i = 0
+                        while i < len(_ssw_buf):
+                            ch = _ssw_buf[i]
+                            if ch == "\\":
+                                if i + 1 < len(_ssw_buf):
+                                    nch = _ssw_buf[i + 1]
+                                    if nch == "n":
+                                        out += "\n"
+                                        i += 2
+                                    elif nch == "t":
+                                        out += "\t"
+                                        i += 2
+                                    elif nch == "r":
+                                        out += "\r"
+                                        i += 2
+                                    elif nch == '"':
+                                        out += '"'
+                                        i += 2
+                                    elif nch == "\\":
+                                        out += "\\"
+                                        i += 2
+                                    elif nch == "/":
+                                        out += "/"
+                                        i += 2
+                                    elif nch == "u" and i + 5 < len(_ssw_buf):
+                                        hex_str = _ssw_buf[i+2:i+6]
+                                        try:
+                                            out += chr(int(hex_str, 16))
+                                            i += 6
+                                        except ValueError:
+                                            out += "\\"
+                                            out += nch
+                                            i += 2
+                                    elif nch == "u":
+                                        break
+                                    else:
+                                        out += "\\"
+                                        out += nch
+                                        i += 2
+                                else:
+                                    break
+                            elif ch == '"':
+                                _ssw_phase = "closed"
+                                _ssw_done = True
+                                break
+                            else:
+                                out += ch
+                                i += 1
+                        _ssw_buf = _ssw_buf[i:]
+                        if out:
+                            _ssw_file.write(out)
+                            _ssw_file.flush()
+                            _ssw_lines += out.count("\n")
+                            _ssw_written += len(out.encode("utf-8"))
+                            sys.stdout.write(f"\r    ✏️  写入: {_ssw_path} ({_ssw_lines + 1} 行, {_ssw_written}B)")
+                            sys.stdout.flush()
+                        if _ssw_done:
+                            _ssw_file.close()
+                            _ssw_file = None
+                            try:
+                                with open(_ssw_path, "r", encoding="utf-8", errors="replace") as _fcnt:
+                                    _real_lines = len(_fcnt.read().splitlines())
+                                sys.stdout.write(f"\r    ✏️  写入: {_ssw_path} ({_real_lines} 行, {_ssw_written}B)\n")
+                            except Exception:
+                                sys.stdout.write("\n")
+                            sys.stdout.flush()
+                            if _ssw_idx is not None and _ssw_path:
+                                _ssw_done_paths[_ssw_idx] = (_ssw_path, _ssw_old_content)
+                elif event[0] == "tool_calls":
+                    tool_calls = event[1]
+                    collected_content = event[2] or collected_content
+                    actual_fr = event[3] if len(event) > 3 else "tool_calls"
+                    finish_reason = actual_fr if actual_fr else "tool_calls"
+                    break
+                elif event[0] == "done":
+                    collected_content = event[1] or collected_content
+                    finish_reason = "stop"
+                    break
+            else:
+                if (time.time() - _last_data_time) > SUB_IDLE_TIMEOUT and finish_reason is None:
+                    timed_out = True
+        except Exception as e:
+            err_str = str(e)
+            if "timed out" in err_str.lower() or "timeout" in err_str.lower():
+                timed_out = True
+            else:
+                if _ssw_file:
+                    try:
+                        _ssw_file.close()
+                    except Exception:
+                        pass
+                sub_spinner.stop()
+                return f"[错误] 子智能体流式响应异常: {e}"
+
+        if sub_aborted:
+            sub_spinner.stop()
+            if _ssw_file:
+                try:
+                    _ssw_file.close()
+                except Exception:
+                    pass
+                _ssw_file = None
+                sys.stdout.write(f"\r    ✏️  写入: {_ssw_path} ({_ssw_lines + 1} 行, {_ssw_written}B) [已中断]\n")
+                sys.stdout.flush()
+            if _sub_header_printed:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            try:
+                resp.raw._fp.close()
+            except Exception:
+                pass
+            try:
+                resp.close()
+            except Exception:
+                pass
+            return "[已中断] 用户中断了子智能体执行"
+
+        if _sub_header_printed:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+        if _ssw_file:
+            try:
+                _ssw_file.close()
+            except Exception:
+                pass
+            _ssw_file = None
+            if _ssw_idx is not None and _ssw_path and _ssw_idx not in _ssw_done_paths:
+                _ssw_done_paths[_ssw_idx] = (_ssw_path, _ssw_old_content)
+                sys.stdout.write(f"\r    ✏️  写入: {_ssw_path} ({_ssw_lines + 1} 行, {_ssw_written}B) [截断]\n")
+                sys.stdout.flush()
+
+        if timed_out:
+            sub_spinner.stop()
+            try:
+                resp.close()
+            except Exception:
+                pass
+            return f"[超时] @{agent_id} 超过 {SUB_IDLE_TIMEOUT}s 无响应，已中断"
+
+        if finish_reason == "length":
+            sub_spinner.stop()
+            if _ssw_file:
+                try:
+                    _ssw_file.close()
+                except Exception:
+                    pass
+                _ssw_file = None
+                if _ssw_idx is not None and _ssw_path and _ssw_idx not in _ssw_done_paths:
+                    _ssw_done_paths[_ssw_idx] = (_ssw_path, _ssw_old_content)
+                    sys.stdout.write(f"\r    \u270f\ufe0f  \u5199\u5165: {_ssw_path} ({_ssw_lines + 1} \u884c, {_ssw_written}B) [\u622a\u65ad]\n")
+                    sys.stdout.flush()
+            sub_history.append({"role": "assistant", "content": collected_content or ""})
+            sub_history.append({"role": "user", "content": "[系统提示] 你的上一次输出因 token 上限被截断。请勿重复已写入内容，直接从断点继续完成剩余工作。如果是文件写入，请使用 edit_file 的 patch 模式追加剩余内容。"})
+            _ssw_buf = ""
+            _ssw_phase = "init"
+            _ssw_path = None
+            _ssw_lines = 0
+            _ssw_written = 0
+            _ssw_old_content = ""
+            _ssw_idx = None
+            _ssw_done = False
+            continue
+
+        if finish_reason == "tool_calls":
             assistant_msg = {
                 "role": "assistant",
-                "content": msg.get("content") or "",
+                "content": collected_content or "",
                 "tool_calls": tool_calls
             }
             sub_history.append(assistant_msg)
 
-            for tc in tool_calls:
+            sub_spinner.stop()
+            for _tc_i, tc in enumerate(tool_calls):
                 func_name = tc["function"]["name"]
                 func_args = tc["function"]["arguments"]
                 tc_id = tc["id"]
-                if mcp_mgr.is_mcp_tool(func_name):
+                _json_valid = True
+                if isinstance(func_args, str):
+                    try:
+                        json.loads(func_args)
+                    except (json.JSONDecodeError, ValueError):
+                        _json_valid = False
+                if not _json_valid:
+                    result = f"[错误] 工具 {func_name} 的参数 JSON 不完整（可能因输出被截断），请重新生成完整调用"
+                    sub_history.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+                    continue
+                if func_name == "edit_file" and _tc_i in _ssw_done_paths:
+                    _dp_path, _dp_old = _ssw_done_paths[_tc_i]
+                    try:
+                        _fa = json.loads(func_args) if isinstance(func_args, str) else func_args
+                    except Exception:
+                        _fa = {}
+                    _fa_action = _fa.get("action", "write")
+                    _fa_path = _fa.get("path", "")
+                    if _fa_action == "write" and _fa_path == _dp_path:
+                        abs_p = os.path.join(WORK_DIR, _fa_path) if not os.path.isabs(_fa_path) else _fa_path
+                        try:
+                            with open(abs_p, "r", encoding="utf-8") as _rf:
+                                written_content = _rf.read()
+                            _action_str = "覆盖" if _dp_old else "创建"
+                            tool_executor._record_diff(_fa_path, _action_str, _dp_old, written_content)
+                        except Exception:
+                            pass
+                        result = f"[成功] 已写入文件: {_fa_path}"
+                    else:
+                        print(f"    {format_tool_log(func_name, func_args).strip()}")
+                        result = tool_executor.execute(func_name, func_args)
+                elif func_name == "call_agent":
+                    try:
+                        _ca = json.loads(func_args) if isinstance(func_args, str) else func_args
+                    except (json.JSONDecodeError, ValueError):
+                        result = "[错误] call_agent 参数不完整（可能因输出截断）"
+                        sub_history.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+                        continue
+                    result = run_sub_agent(_ca.get("agent_id", ""), _ca.get("message", ""))
+                elif mcp_mgr.is_mcp_tool(func_name):
                     result = mcp_mgr.call_tool(func_name, func_args)
                 else:
+                    print(f"    {format_tool_log(func_name, func_args).strip()}")
                     result = tool_executor.execute(func_name, func_args)
                 sub_history.append({"role": "tool", "tool_call_id": tc_id, "content": result})
+            _ssw_done = False
+            _ssw_path = None
+            _ssw_old_content = ""
+            _ssw_buf = ""
+            _ssw_phase = "init"
+            _ssw_lines = 0
+            _ssw_written = 0
+            _ssw_idx = None
+            _ssw_done_paths = {}
+            sub_spinner.reset_time()
             continue
 
-        final_content = msg.get("content", "")
-        return final_content if final_content else "[子智能体未返回内容]"
+        sub_spinner.stop()
+        return collected_content if collected_content else "[子智能体未返回内容]"
 
+    sub_spinner.stop()
     return "[错误] 子智能体达到最大工具调用轮数"
+
+
 
 
 def switch_agent(agent_id, silent=False):
@@ -378,24 +749,32 @@ def chat(user_input):
     start_abort_listener()
     try:
         return _chat_loop(mgr, effective_tools)
+    except AbortInterrupt:
+        sys.stdout.write("")
+        sys.stdout.flush()
+        mgr.add_interrupt_hint()
+        return None
     finally:
         stop_abort_listener()
 
 
 def _chat_loop(mgr, effective_tools):
+    from .terminal_control import get_abort_flag as _get_abort_flag
+
     for round_num in range(MAX_TOOL_ROUNDS):
-        from terminal_control import abort_flag
-        if abort_flag:
+        from . import terminal_control as _tc
+        if _tc.get_abort_flag():
             mgr.add_interrupt_hint()
             return None
 
-        spinner = Spinner("AI 正在思考")
+        spinner = Spinner("AI 正在整理工具结果" if round_num > 0 else "AI 正在思考")
         spinner.start()
         try:
             resp = send_chat_request(
                 current_api_url, current_api_key, current_history, current_model,
                 temperature=current_temperature, tools=effective_tools, stream=True,
-                connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"]
+                connect_timeout=_cfg["连接超时秒数"], read_timeout=_cfg["响应超时秒数"],
+                max_tokens=16384
             )
         except requests.RequestException as e:
             spinner.stop()
@@ -411,19 +790,50 @@ def _chat_loop(mgr, effective_tools):
                 mgr.rollback_user_message()
             return None
 
+        from . import terminal_control as _tc
+        if _tc.get_abort_flag():
+            spinner.stop()
+            resp.close()
+            mgr.add_interrupt_hint()
+            return None
+
         got_tool_calls = False
         final_text = ""
         aborted = False
         header_printed = False
+        _tc_entered = False
+        _sw_buf = ""
+        _sw_phase = "init"
+        _sw_path = None
+        _sw_file = None
+        _sw_lines = 0
+        _sw_written = 0
+        _sw_done = False
+        _sw_old_content = ""
+        _sw_idx = None
+        _sw_done_paths = {}
 
-        for event in parse_stream_response(resp):
-            from terminal_control import abort_flag
-            if abort_flag:
+        def _force_close_resp():
+            try:
+                resp.raw._fp.close()
+            except Exception:
+                pass
+            try:
+                resp.close()
+            except Exception:
+                pass
+        set_abort_callback(_force_close_resp)
+        from . import terminal_control as _tc
+        for event in parse_stream_response(resp, abort_check=lambda: _tc.get_abort_flag()):
+            if _tc.get_abort_flag():
                 spinner.stop()
                 aborted = True
                 break
 
             if event[0] == "content":
+                if _tc.get_abort_flag():
+                    aborted = True
+                    break
                 if not header_printed:
                     spinner.stop()
                     sys.stdout.write(f"\n{get_ai_name()}: ")
@@ -433,11 +843,176 @@ def _chat_loop(mgr, effective_tools):
                 sys.stdout.flush()
                 final_text += event[1]
 
+            elif event[0] == "tool_receiving":
+                tool_name = event[1]
+                args_len = event[2]
+                args_delta = event[3] if len(event) > 3 else ""
+                tc_idx = event[4] if len(event) > 4 else 0
+                if not _tc_entered:
+                    _tc_entered = True
+                    if header_printed:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                _is_write_tool = tool_name in ("edit_file",)
+                if not _is_write_tool:
+                    if not spinner._started:
+                        spinner.message = "AI 正在思考"
+                        spinner.start()
+                    continue
+                if _sw_done:
+                    if _sw_idx is not None and tc_idx == _sw_idx:
+                        continue
+                    _sw_done = False
+                    _sw_buf = ""
+                    _sw_phase = "init"
+                    _sw_path = None
+                    _sw_lines = 0
+                    _sw_written = 0
+                    _sw_old_content = ""
+                    _sw_idx = tc_idx
+                if _sw_idx is None:
+                    _sw_idx = tc_idx
+                if tc_idx != _sw_idx:
+                    continue
+                _sw_buf += args_delta
+                if _sw_phase in ("init", "scanning"):
+                    if _sw_phase == "init":
+                        if '"action"' in _sw_buf:
+                            if '"patch"' in _sw_buf or '"delete"' in _sw_buf:
+                                _sw_phase = "not_write"
+                                if not spinner._started:
+                                    spinner.message = "AI 正在思考"
+                                    spinner.start()
+                                continue
+                            elif '"write"' in _sw_buf:
+                                _sw_phase = "scanning"
+                            else:
+                                if not spinner._started:
+                                    spinner.message = "AI 正在思考"
+                                    spinner.start()
+                                continue
+                        else:
+                            if not spinner._started:
+                                spinner.message = "AI 正在思考"
+                                spinner.start()
+                            continue
+                    if _sw_phase == "scanning":
+                        if not _sw_path:
+                            for pm in ['"path": "', '"path":"']:
+                                pi = _sw_buf.find(pm)
+                                if pi >= 0:
+                                    pe = _sw_buf.find('"', pi + len(pm))
+                                    if pe >= 0:
+                                        _sw_path = _sw_buf[pi + len(pm):pe]
+                                        break
+                        content_pos = -1
+                        for cm in ['"content": "', '"content":"']:
+                            ci = _sw_buf.find(cm)
+                            if ci >= 0:
+                                content_pos = ci + len(cm)
+                                break
+                        if _sw_path and content_pos >= 0:
+                            _sw_phase = "streaming"
+                            _sw_buf = _sw_buf[content_pos:]
+                            if spinner._started:
+                                spinner.stop()
+                            abs_path = os.path.join(WORK_DIR, _sw_path) if not os.path.isabs(_sw_path) else _sw_path
+                            parent_dir = os.path.dirname(abs_path) or "."
+                            os.makedirs(parent_dir, exist_ok=True)
+                            if os.path.isfile(abs_path):
+                                try:
+                                    with open(abs_path, "r", encoding="utf-8", errors="replace") as _of:
+                                        _sw_old_content = _of.read()
+                                except Exception:
+                                    pass
+                            _sw_file = open(abs_path, "w", encoding="utf-8")
+                            sys.stdout.write(f"  ✏️  写入: {_sw_path} ")
+                            sys.stdout.flush()
+                        else:
+                            if not spinner._started:
+                                spinner.message = "AI 正在思考"
+                                spinner.start()
+                            continue
+                if _sw_phase == "not_write":
+                    if not spinner._started:
+                        spinner.message = "AI 正在思考"
+                        spinner.start()
+                    continue
+                if _sw_phase == "streaming":
+                    out = ""
+                    i = 0
+                    while i < len(_sw_buf):
+                        ch = _sw_buf[i]
+                        if ch == "\\":
+                            if i + 1 < len(_sw_buf):
+                                nch = _sw_buf[i + 1]
+                                if nch == "n":
+                                    out += "\n"
+                                    i += 2
+                                elif nch == "t":
+                                    out += "\t"
+                                    i += 2
+                                elif nch == "r":
+                                    out += "\r"
+                                    i += 2
+                                elif nch == '"':
+                                    out += '"'
+                                    i += 2
+                                elif nch == "\\":
+                                    out += "\\"
+                                    i += 2
+                                elif nch == "/":
+                                    out += "/"
+                                    i += 2
+                                elif nch == "u" and i + 5 < len(_sw_buf):
+                                    hex_str = _sw_buf[i+2:i+6]
+                                    try:
+                                        out += chr(int(hex_str, 16))
+                                        i += 6
+                                    except ValueError:
+                                        out += "\\"
+                                        out += nch
+                                        i += 2
+                                elif nch == "u":
+                                    break
+                                else:
+                                    out += "\\"
+                                    out += nch
+                                    i += 2
+                            else:
+                                break
+                        elif ch == '"':
+                            _sw_phase = "closed"
+                            _sw_done = True
+                            break
+                        else:
+                            out += ch
+                            i += 1
+                    _sw_buf = _sw_buf[i:]
+                    if out:
+                        _sw_file.write(out)
+                        _sw_file.flush()
+                        _sw_lines += out.count("\n")
+                        _sw_written += len(out.encode("utf-8"))
+                        sys.stdout.write(f"\r  ✏️  写入: {_sw_path} ({_sw_lines + 1} 行, {_sw_written}B)")
+                        sys.stdout.flush()
+                    if _sw_done:
+                        _sw_file.close()
+                        _sw_file = None
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        if _sw_idx is not None and _sw_path:
+                            _sw_done_paths[_sw_idx] = (_sw_path, _sw_old_content)
+
             elif event[0] == "tool_calls":
+                if _tc.get_abort_flag():
+                    aborted = True
+                    break
                 spinner.stop()
                 got_tool_calls = True
                 tool_calls = event[1]
                 tc_content = event[2]
+                tc_finish_reason = event[3] if len(event) > 3 else "tool_calls"
                 break
 
             elif event[0] == "done":
@@ -445,13 +1020,53 @@ def _chat_loop(mgr, effective_tools):
                 final_text = event[1]
                 break
 
+        clear_abort_callback()
+
+        if not aborted and _tc.get_abort_flag():
+            aborted = True
+
         if aborted:
+            if _sw_file:
+                try:
+                    _sw_file.close()
+                except Exception:
+                    pass
+                sys.stdout.write(" [中断]\n")
+                sys.stdout.flush()
+            try:
+                resp.close()
+            except Exception:
+                pass
             if header_printed:
                 sys.stdout.write("\n")
             if final_text:
                 mgr.save_assistant_reply(final_text + "\n[此处被用户中断]")
             mgr.add_interrupt_hint()
             return None
+
+        if _sw_file:
+            try:
+                _sw_file.close()
+            except Exception:
+                pass
+            _sw_file = None
+            if _sw_idx is not None and _sw_path and _sw_idx not in _sw_done_paths:
+                _sw_done_paths[_sw_idx] = (_sw_path, _sw_old_content)
+                sys.stdout.write(f"\r  ✏️  写入: {_sw_path} ({_sw_lines + 1} 行, {_sw_written}B) [截断]\n")
+                sys.stdout.flush()
+
+        if got_tool_calls and tc_finish_reason == "length":
+            sys.stdout.write("  ⚠️  输出被截断（token上限），自动续写中...\n")
+            sys.stdout.flush()
+            _done_info = []
+            for _di, (_dp, _) in _sw_done_paths.items():
+                _done_info.append(_dp)
+            mgr.save_assistant_reply(tc_content or "")
+            _hint = "[系统提示] 你的上一次输出因 token 上限被截断，工具调用参数不完整。请勿重复已完成的操作，直接从断点继续完成剩余工作。如果是文件写入，请使用 edit_file 重新生成完整的工具调用。"
+            if _done_info:
+                _hint += f" 以下文件已通过流式写入完成，不要再写：{', '.join(_done_info)}"
+            mgr.history.append({"role": "user", "content": _hint})
+            continue
 
         if not got_tool_calls:
             if header_printed:
@@ -464,8 +1079,8 @@ def _chat_loop(mgr, effective_tools):
 
         if tc_content and not header_printed:
             print(f"\n{get_ai_name()}: {tc_content}")
-        elif header_printed:
-            sys.stdout.write("\n")
+        elif not header_printed and not _tc_entered:
+            print(f"\n{get_ai_name()}: [执行操作]")
 
         assistant_msg = {
             "role": "assistant",
@@ -480,6 +1095,17 @@ def _chat_loop(mgr, effective_tools):
             and all(tc["function"]["name"] in PARALLEL_SAFE_TOOLS for tc in tool_calls)
         )
 
+        _fold_types = set()
+        if len(tool_calls) > 2:
+            _type_count = {}
+            for _t in tool_calls:
+                _tn = _t["function"]["name"]
+                _type_count[_tn] = _type_count.get(_tn, 0) + 1
+            for _tn, _cnt in _type_count.items():
+                if _cnt > 2:
+                    _fold_types.add(_tn)
+            print("  🔧 调用工具中")
+
         if can_parallel:
             results_map = {}
 
@@ -487,16 +1113,17 @@ def _chat_loop(mgr, effective_tools):
                 fn = tc["function"]["name"]
                 fa = tc["function"]["arguments"]
                 tid = tc["id"]
-                with _print_lock:
-                    print(format_tool_log(fn, fa))
+                if fn not in _fold_types:
+                    with _print_lock:
+                        print(format_tool_log(fn, fa))
                 res = tool_executor.execute(fn, fa)
                 return tid, res
 
             with ThreadPoolExecutor(max_workers=min(len(tool_calls), 8)) as pool:
                 futures = {pool.submit(_run_parallel, tc): tc for tc in tool_calls}
                 for future in as_completed(futures):
-                    from terminal_control import abort_flag
-                    if abort_flag:
+                    from . import terminal_control as _tc
+                    if _tc.get_abort_flag():
                         print("\n\n🛑 已中断工具执行")
                         mgr.add_interrupt_hint()
                         resume_listener()
@@ -507,9 +1134,9 @@ def _chat_loop(mgr, effective_tools):
             for tc in tool_calls:
                 mgr.save_tool_result(tc["id"], results_map[tc["id"]])
         else:
-            for tc in tool_calls:
-                from terminal_control import abort_flag
-                if abort_flag:
+            for _tc_i, tc in enumerate(tool_calls):
+                from . import terminal_control as _tc
+                if _tc.get_abort_flag():
                     print("\n\n🛑 已中断工具执行")
                     mgr.add_interrupt_hint()
                     resume_listener()
@@ -519,8 +1146,47 @@ def _chat_loop(mgr, effective_tools):
                 func_args = tc["function"]["arguments"]
                 tc_id = tc["id"]
 
-                if func_name == "call_agent":
-                    _args = json.loads(func_args) if isinstance(func_args, str) else func_args
+                _json_valid = True
+                if isinstance(func_args, str):
+                    try:
+                        json.loads(func_args)
+                    except (json.JSONDecodeError, ValueError):
+                        _json_valid = False
+                if not _json_valid:
+                    result = f"[错误] 工具 {func_name} 的参数 JSON 不完整（可能因输出被截断），请重新生成完整调用"
+                    mgr.save_tool_result(tc_id, result)
+                    continue
+
+                if func_name == "edit_file" and _tc_i in _sw_done_paths:
+                    _dp_path, _dp_old = _sw_done_paths[_tc_i]
+                    try:
+                        _fa = json.loads(func_args) if isinstance(func_args, str) else func_args
+                    except Exception:
+                        _fa = {}
+                    _fa_action = _fa.get("action", "write")
+                    _fa_path = _fa.get("path", "")
+                    if _fa_action == "write" and _fa_path == _dp_path:
+                        abs_p = os.path.join(WORK_DIR, _fa_path) if not os.path.isabs(_fa_path) else _fa_path
+                        try:
+                            with open(abs_p, "r", encoding="utf-8") as _rf:
+                                written_content = _rf.read()
+                            _action = "覆盖" if _dp_old else "创建"
+                            tool_executor._record_diff(_fa_path, _action, _dp_old, written_content)
+                        except Exception:
+                            pass
+                        result = f"[成功] 已写入文件: {_fa_path}"
+                    else:
+                        if func_name not in _fold_types:
+                            print(format_tool_log(func_name, func_args))
+                        result = tool_executor.execute(func_name, func_args)
+                elif func_name == "call_agent":
+                    print(format_tool_log(func_name, func_args))
+                    try:
+                        _args = json.loads(func_args) if isinstance(func_args, str) else func_args
+                    except (json.JSONDecodeError, ValueError):
+                        result = "[错误] call_agent 参数不完整（可能因输出截断）"
+                        mgr.save_tool_result(tc_id, result)
+                        continue
                     _agent_id = _args.get("agent_id", "")
                     result = run_sub_agent(_agent_id, _args.get("message", ""))
                     if result.startswith("[错误]"):
@@ -529,12 +1195,18 @@ def _chat_loop(mgr, effective_tools):
                         print(f"  🤖 @{_agent_id}:")
                         print(f"  {result}")
                 elif mcp_mgr.is_mcp_tool(func_name):
-                    print(format_tool_log(func_name, func_args))
+                    if func_name not in _fold_types:
+                        print(format_tool_log(func_name, func_args))
                     result = mcp_mgr.call_tool(func_name, func_args)
                 else:
-                    print(format_tool_log(func_name, func_args))
+                    if func_name not in _fold_types:
+                        print(format_tool_log(func_name, func_args))
                     result = tool_executor.execute(func_name, func_args)
                 mgr.save_tool_result(tc_id, result)
+
+                if _tc.get_abort_flag():
+                    mgr.add_interrupt_hint()
+                    return None
         resume_listener()
 
         continue
@@ -599,6 +1271,7 @@ def _list_sessions():
     files.sort(key=lambda x: x[1], reverse=True)
     return files
 
+
 def _do_compress(mgr, silent=False):
     if not silent:
         print("\n📦 正在压缩历史记忆...")
@@ -619,6 +1292,7 @@ def _do_compress(mgr, silent=False):
 
 
 def main():
+    global MAX_HISTORY_ROUNDS, MAX_TOOL_ROUNDS, COMPRESS_THRESHOLD, COMPRESS_KEEP_RECENT, ALL_TOOLS
     switch_agent(None, silent=True)
 
     agents = list_agents()
@@ -649,8 +1323,7 @@ def main():
         try:
             agent_tag = f"@{current_agent['id']}" if current_agent and current_agent["id"] != "global" else ""
             round_num = tool_executor.current_round + 1
-            prompt = f"\033[90m[{round_num}]\033[0m 你{agent_tag}: "
-            user_text = input(prompt).strip()
+            user_text = input(f"[{round_num}] 你{agent_tag}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见！")
             break
@@ -827,10 +1500,10 @@ def main():
             def _build_display_list(groups, cur):
                 display = []
                 for grp in groups:
-                    when = f"\u7b2c{grp[0]['round']}\u8f6e\u5bf9\u8bdd"
+                    when = f"第{grp[0]['round']}轮对话"
                     if len(grp) <= 3:
                         for r in grp:
-                            act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
+                            act_map = {"创建": "创建", "覆盖": "修改", "删除": "删除"}
                             act = act_map.get(r["action"], r["action"])
                             display.append({"type": "single", "record": r, "when": when, "act": act})
                     else:
@@ -838,87 +1511,87 @@ def main():
                 return display
 
             def _show_detail(r, cur):
-                when = f"\u7b2c{r['round']}\u8f6e\u5bf9\u8bdd"
-                act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
+                when = f"第{r['round']}轮对话"
+                act_map = {"创建": "创建", "覆盖": "修改", "删除": "删除"}
                 act = act_map.get(r["action"], r["action"])
-                print(f"\n\U0001f4c4 [{r['time']}] \u4e8e{when}\u4e2d{act} {r['path']}")
-                print("\u2500" * 50)
+                print(f"\n📄 [{r['time']}] 于{when}中{act} {r['path']}")
+                print("─" * 50)
                 detail_record = {"old": r["old"], "new": r["new"], "action": r["action"]}
                 diff_text = tool_executor._format_diff(detail_record)
                 if diff_text:
                     print(diff_text)
                 else:
-                    print("\uff08\u65e0\u5dee\u5f02\uff09")
-                print("\u2500" * 50)
-                print("  \033[31m- \u5220\u9664/\u65e7\033[0m  \033[32m+ \u65b0\u589e/\u65b0\033[0m")
+                    print("（无差异）")
+                print("─" * 50)
+                print("  \033[31m- 删除/旧\033[0m  \033[32m+ 新增/新\033[0m")
                 print()
 
             if not arg:
                 if not records:
-                    print("\n\U0001f4c4 \u6682\u65e0\u6587\u4ef6\u6539\u52a8\u8bb0\u5f55\n")
+                    print("\n📄 暂无文件改动记录\n")
                 else:
                     groups = _group_records(records, cur)
                     groups.reverse()
                     display = _build_display_list(groups, cur)
-                    print(f"\n\U0001f4c4 \u6587\u4ef6\u6539\u52a8\u8bb0\u5f55\uff08\u5171 {len(records)} \u6761\uff0c{len(display)} \u9879\uff09:")
+                    print(f"\n📄 文件改动记录（共 {len(records)} 条，{len(display)} 项）:")
                     for i, item in enumerate(display, 1):
                         if item["type"] == "single":
                             r = item["record"]
-                            print(f"  {i}. [{r['time']}] \u4e8e{item['when']}\u4e2d{item['act']} {r['path']}")
+                            print(f"  {i}. [{r['time']}] 于{item['when']}中{item['act']} {r['path']}")
                         else:
-                            print(f"  {i}. [{item['time']}] \u4e8e{item['when']}\u4e2d\u6539\u52a8 {item['count']} \u4e2a\u6587\u4ef6")
-                    print(f"\n  /diff N      \u67e5\u770b\u7b2c N \u9879\u8be6\u60c5\uff08\u6298\u53e0\u9879\u4f1a\u5c55\u5f00\uff09")
-                    print(f"  /diff N.M    \u67e5\u770b\u6298\u53e0\u9879\u4e2d\u7b2c M \u6761\u7684\u8be6\u7ec6 diff")
-                    print(f"  /diff \u8def\u5f84   \u67e5\u770b\u6307\u5b9a\u6587\u4ef6\u7684\u6539\u52a8\u5386\u53f2\n")
+                            print(f"  {i}. [{item['time']}] 于{item['when']}中改动 {item['count']} 个文件")
+                    print(f"\n  /diff N      查看第 N 项详情（折叠项会展开）")
+                    print(f"  /diff N.M    查看折叠项中第 M 条的详细 diff")
+                    print(f"  /diff 路径   查看指定文件的改动历史\n")
             elif "." in arg and arg.replace(".", "").isdigit():
                 parts_dot = arg.split(".", 1)
                 try:
                     main_idx = int(parts_dot[0])
                     sub_idx = int(parts_dot[1])
                 except ValueError:
-                    print("\u26a0\ufe0f \u683c\u5f0f\u9519\u8bef\uff0c\u8bf7\u4f7f\u7528 /diff N.M\n")
+                    print("⚠️ 格式错误，请使用 /diff N.M\n")
                     continue
                 if not records:
-                    print("\n\U0001f4c4 \u6682\u65e0\u6587\u4ef6\u6539\u52a8\u8bb0\u5f55\n")
+                    print("\n📄 暂无文件改动记录\n")
                     continue
                 groups = _group_records(records, cur)
                 groups.reverse()
                 display = _build_display_list(groups, cur)
                 if main_idx < 1 or main_idx > len(display):
-                    print(f"\u26a0\ufe0f \u5e8f\u53f7\u8d85\u51fa\u8303\u56f4\uff08\u5f53\u524d\u5171 {len(display)} \u9879\uff09\n")
+                    print(f"⚠️ 序号超出范围（当前共 {len(display)} 项）\n")
                     continue
                 item = display[main_idx - 1]
                 if item["type"] == "single":
-                    print(f"\u26a0\ufe0f \u7b2c {main_idx} \u9879\u4e3a\u5355\u6761\u8bb0\u5f55\uff0c\u8bf7\u76f4\u63a5\u4f7f\u7528 /diff {main_idx}\n")
+                    print(f"⚠️ 第 {main_idx} 项为单条记录，请直接使用 /diff {main_idx}\n")
                     continue
                 grp_records = item["records"]
                 if sub_idx < 1 or sub_idx > len(grp_records):
-                    print(f"\u26a0\ufe0f \u5b50\u5e8f\u53f7\u8d85\u51fa\u8303\u56f4\uff08\u8be5\u7ec4\u5171 {len(grp_records)} \u6761\uff09\n")
+                    print(f"⚠️ 子序号超出范围（该组共 {len(grp_records)} 条）\n")
                     continue
                 _show_detail(grp_records[sub_idx - 1], cur)
             else:
                 try:
                     idx = int(arg)
                     if not records:
-                        print("\n\U0001f4c4 \u6682\u65e0\u6587\u4ef6\u6539\u52a8\u8bb0\u5f55\n")
+                        print("\n📄 暂无文件改动记录\n")
                         continue
                     groups = _group_records(records, cur)
                     groups.reverse()
                     display = _build_display_list(groups, cur)
                     if idx < 1 or idx > len(display):
-                        print(f"\u26a0\ufe0f \u5e8f\u53f7\u8d85\u51fa\u8303\u56f4\uff08\u5f53\u524d\u5171 {len(display)} \u9879\uff09\n")
+                        print(f"⚠️ 序号超出范围（当前共 {len(display)} 项）\n")
                         continue
                     item = display[idx - 1]
                     if item["type"] == "single":
                         _show_detail(item["record"], cur)
                     else:
                         grp_records = item["records"]
-                        print(f"\n\U0001f4c4 \u4e8e{item['when']}\u4e2d\u6539\u52a8\u8be6\u60c5\uff08{item['count']} \u4e2a\u6587\u4ef6\uff09:")
+                        print(f"\n📄 于{item['when']}中改动详情（{item['count']} 个文件）:")
                         for j, r in enumerate(grp_records, 1):
-                            act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
+                            act_map = {"创建": "创建", "覆盖": "修改", "删除": "删除"}
                             act = act_map.get(r["action"], r["action"])
                             print(f"  {idx}.{j} [{r['time']}] {act} {r['path']}")
-                        print(f"\n  /diff {idx}.M  \u67e5\u770b\u7b2c M \u6761\u7684\u8be6\u7ec6 diff\n")
+                        print(f"\n  /diff {idx}.M  查看第 M 条的详细 diff\n")
                 except ValueError:
                     parts = arg.rsplit(None, 1)
                     file_path = parts[0]
@@ -930,20 +1603,20 @@ def main():
                             pass
                     file_records = tool_executor.get_diff_by_path(file_path)
                     if not file_records:
-                        print(f"\u26a0\ufe0f \u672a\u627e\u5230 {file_path} \u7684\u6539\u52a8\u8bb0\u5f55\n")
+                        print(f"⚠️ 未找到 {file_path} 的改动记录\n")
                     elif sub_idx is not None:
                         if sub_idx < 1 or sub_idx > len(file_records):
-                            print(f"\u26a0\ufe0f \u5e8f\u53f7\u8d85\u51fa\u8303\u56f4\uff08\u8be5\u6587\u4ef6\u5171 {len(file_records)} \u6761\u8bb0\u5f55\uff09\n")
+                            print(f"⚠️ 序号超出范围（该文件共 {len(file_records)} 条记录）\n")
                         else:
                             _show_detail(file_records[sub_idx - 1], cur)
                     else:
-                        print(f"\n\U0001f4c4 {file_path} \u7684\u6539\u52a8\u5386\u53f2\uff08\u5171 {len(file_records)} \u6761\uff09:")
+                        print(f"\n📄 {file_path} 的改动历史（共 {len(file_records)} 条）:")
                         for i, r in enumerate(file_records, 1):
-                            when = f"\u7b2c{r['round']}\u8f6e\u5bf9\u8bdd"
-                            act_map = {"\u521b\u5efa": "\u521b\u5efa", "\u8986\u76d6": "\u4fee\u6539", "\u5220\u9664": "\u5220\u9664"}
+                            when = f"第{r['round']}轮对话"
+                            act_map = {"创建": "创建", "覆盖": "修改", "删除": "删除"}
                             act = act_map.get(r["action"], r["action"])
-                            print(f"  {i}. [{r['time']}] \u4e8e{when}\u4e2d{act}")
-                        print(f"\n  /diff {file_path} N  \u67e5\u770b\u7b2c N \u6761\u7684\u8be6\u7ec6 diff\n")
+                            print(f"  {i}. [{r['time']}] 于{when}中{act}")
+                        print(f"\n  /diff {file_path} N  查看第 N 条的详细 diff\n")
             continue
 
         if user_text.lower() == "/mcp":

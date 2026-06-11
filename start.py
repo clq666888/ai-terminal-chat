@@ -65,38 +65,17 @@ def check_dependencies():
         sys.exit(1)
 
 
-def detect_platform():
-    system = platform.system()
-    if system in ("Linux", "Darwin"):
-        return "linux"
-    elif system == "Windows":
-        return "windows"
-    else:
-        print(f"❌ 不支持的系统: {system}")
-        sys.exit(1)
-
-
 def main():
     check_python_version()
     check_dependencies()
 
-    plat = detect_platform()
-    target_dir = os.path.join(SCRIPT_DIR, plat)
-    entry = os.path.join(target_dir, "api_chat.py")
-
-    if not os.path.isfile(entry):
-        print(f"❌ 找不到入口文件: {entry}")
-        sys.exit(1)
-
     os.environ["POLYAI_USER_CWD"] = os.getcwd()
-    os.chdir(target_dir)
-    if target_dir not in sys.path:
-        sys.path.insert(0, target_dir)
-    sys.argv[0] = entry
 
-    with open(entry, encoding="utf-8") as f:
-        code = f.read()
-    exec(compile(code, entry, "exec"), {"__file__": entry, "__name__": "__main__"})
+    if SCRIPT_DIR not in sys.path:
+        sys.path.insert(0, SCRIPT_DIR)
+
+    from core.api_chat import main as run_main
+    run_main()
 
 
 if __name__ == "__main__":

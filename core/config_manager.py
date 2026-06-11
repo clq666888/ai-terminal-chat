@@ -1,8 +1,8 @@
 import os
 import re
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.txt")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.txt")
 
 SECTION_PATTERN = re.compile(r"^\[(.+)\]\s*$")
 
@@ -114,7 +114,7 @@ def load_project_context(work_dir):
     return "\n".join(parts)
 
 
-SESSIONS_DIR = os.path.join(SCRIPT_DIR, "sessions")
+SESSIONS_DIR = os.path.join(PROJECT_ROOT, "sessions")
 
 
 def get_sessions_dir():

@@ -6,14 +6,31 @@ import time
 import termios
 import tty
 import select
+import ctypes
 
-from chat_core import parse_stream_chunk
+from .chat_core import parse_stream_chunk
 
 generating = False
 abort_flag = False
 listener_stop = threading.Event()
 _old_termios_global = None
 _listener_global = None
+_abort_callback = None
+_main_thread_id = threading.main_thread().ident
+
+
+class AbortInterrupt(BaseException):
+    pass
+
+
+def set_abort_callback(cb):
+    global _abort_callback
+    _abort_callback = cb
+
+
+def clear_abort_callback():
+    global _abort_callback
+    _abort_callback = None
 
 _initial_termios = None
 
@@ -44,6 +61,22 @@ _save_initial_termios()
 atexit.register(_restore_terminal)
 
 
+def _inject_abort_to_main():
+    try:
+        ret = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(_main_thread_id),
+            ctypes.py_object(AbortInterrupt)
+        )
+        if ret == 0:
+            pass
+        elif ret > 1:
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(_main_thread_id), None
+            )
+    except Exception:
+        pass
+
+
 def _key_listener():
     global generating, abort_flag
     while not listener_stop.is_set():
@@ -55,19 +88,31 @@ def _key_listener():
         except Exception:
             break
 
-        if not generating:
-            continue
-
         if ch == '\x11':
             abort_flag = True
             generating = False
-            sys.stdout.write("\n\n🛑 已中断生成")
+            if _abort_callback:
+                try:
+                    _abort_callback()
+                except Exception:
+                    pass
+            sys.stdout.write("\n\n\U0001f6d1 已中断生成")
             sys.stdout.flush()
             break
+
+        if not generating:
+            continue
 
 
 def start_abort_listener():
     global generating, abort_flag, _old_termios_global, _listener_global
+
+    abort_flag = False
+    generating = True
+    listener_stop.clear()
+
+    if not sys.stdin.isatty():
+        return
 
     fd = sys.stdin.fileno()
     _old_termios_global = termios.tcgetattr(fd)
@@ -75,10 +120,6 @@ def start_abort_listener():
     new_attr = termios.tcgetattr(fd)
     new_attr[0] &= ~(termios.IXON | termios.IXOFF)
     termios.tcsetattr(fd, termios.TCSANOW, new_attr)
-
-    abort_flag = False
-    generating = True
-    listener_stop.clear()
 
     _listener_global = threading.Thread(target=_key_listener, daemon=True)
     _listener_global.start()
@@ -91,7 +132,10 @@ def stop_abort_listener():
     listener_stop.set()
 
     if _listener_global:
-        _listener_global.join(timeout=0.3)
+        try:
+            _listener_global.join(timeout=0.5)
+        except (AbortInterrupt, BaseException):
+            pass
         _listener_global = None
 
     if _old_termios_global:
@@ -106,30 +150,13 @@ def stop_abort_listener():
 def pause_listener():
     global generating
     generating = False
-    listener_stop.set()
-    if _listener_global:
-        _listener_global.join(timeout=0.3)
-    if _old_termios_global:
-        try:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _old_termios_global)
-        except Exception:
-            pass
 
 
 def resume_listener():
-    global generating, _listener_global
+    global generating
     if abort_flag:
         return
-    fd = sys.stdin.fileno()
-    tty.setcbreak(fd)
-    new_attr = termios.tcgetattr(fd)
-    new_attr[0] &= ~(termios.IXON | termios.IXOFF)
-    termios.tcsetattr(fd, termios.TCSANOW, new_attr)
-
     generating = True
-    listener_stop.clear()
-    _listener_global = threading.Thread(target=_key_listener, daemon=True)
-    _listener_global.start()
 
 
 def is_aborted():
@@ -166,7 +193,10 @@ class TerminalManager:
         listener_stop.set()
 
         if self._listener:
-            self._listener.join(timeout=0.3)
+            try:
+                self._listener.join(timeout=0.5)
+            except (AbortInterrupt, BaseException):
+                pass
 
         if self._old_termios:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_termios)
