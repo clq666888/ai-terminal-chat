@@ -10,11 +10,26 @@ const btnCloseProject = document.getElementById("btn-close-project");
 const btnSaveProject = document.getElementById("btn-save-project");
 const projectName = document.getElementById("project-name");
 const projectPrompt = document.getElementById("project-prompt");
+const projectAgentList = document.getElementById("project-agent-list");
+const btnProjAgentAdd = document.getElementById("btn-proj-agent-add");
+const projAgentOverlay = document.getElementById("proj-agent-overlay");
+const projAgentTitle = document.getElementById("proj-agent-title");
+const projAgentName = document.getElementById("proj-agent-name");
+const projAgentPrompt = document.getElementById("proj-agent-prompt");
+const projAgentModel = document.getElementById("proj-agent-model");
+const btnProjAgentSave = document.getElementById("btn-proj-agent-save");
+const btnProjAgentClose = document.getElementById("btn-proj-agent-close");
 const projectModel = document.getElementById("project-model");
 const projectKbGroup = document.getElementById("project-kb-group");
 const projectKbList = document.getElementById("project-kb-list");
 const btnKbUpload = document.getElementById("btn-kb-upload");
 const projectKbFile = document.getElementById("project-kb-file");
+const btnKbCreate = document.getElementById("btn-kb-create");
+const kbCreateOverlay = document.getElementById("kb-create-overlay");
+const kbCreateName = document.getElementById("kb-create-name");
+const kbCreateContent = document.getElementById("kb-create-content");
+const btnKbCreateSave = document.getElementById("btn-kb-create-save");
+const btnKbCreateClose = document.getElementById("btn-kb-create-close");
 const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
 const sidebar = document.getElementById("sidebar");
 const convList = document.getElementById("conv-list");
@@ -55,6 +70,7 @@ const agentSelectorName = document.getElementById("agent-selector-name");
 const agentDropdown = document.getElementById("agent-dropdown");
 const agentDropdownList = document.getElementById("agent-dropdown-list");
 const agentDropdownManage = document.getElementById("agent-dropdown-manage");
+const agentDropdownManageLabel = document.getElementById("agent-dropdown-manage-label");
 
 const agentOverlay = document.getElementById("agent-overlay");
 const btnCloseAgentPanel = document.getElementById("btn-close-agent-panel");
@@ -104,6 +120,7 @@ let generatingConvId = null;
 let welcomeHTML = welcome ? welcome.outerHTML : "";
 let providers = {};
 let currentAgentId = null;
+let currentProjectId = null;
 let editingAgentId = null;
 let agentAvatarUrl = "";
 let cachedAgents = [];
@@ -159,7 +176,10 @@ btnNewChat.addEventListener("click", () => createNewConversation());
 if (btnNewProject) btnNewProject.addEventListener("click", () => openProjectModal(null));
 if (btnCloseProject) btnCloseProject.addEventListener("click", closeProjectModal);
 if (btnSaveProject) btnSaveProject.addEventListener("click", saveProject);
-if (projectOverlay) projectOverlay.addEventListener("click", e => { if (e.target === projectOverlay) closeProjectModal(); });
+if (btnProjAgentAdd) btnProjAgentAdd.addEventListener("click", () => openProjAgentForm(null));
+if (btnProjAgentClose) btnProjAgentClose.addEventListener("click", closeProjAgentForm);
+if (btnProjAgentSave) btnProjAgentSave.addEventListener("click", saveProjAgent);
+// 项目编辑界面：点击遮罩外部不再关闭，避免误触丢失编辑内容（仅可通过关闭按钮关闭）
 if (btnKbUpload) btnKbUpload.addEventListener("click", () => { if (!btnKbUpload.disabled) projectKbFile.click(); });
 if (projectKbFile) projectKbFile.addEventListener("change", async () => {
     if (projectKbFile.files && projectKbFile.files.length) {
@@ -167,6 +187,9 @@ if (projectKbFile) projectKbFile.addEventListener("change", async () => {
         projectKbFile.value = "";
     }
 });
+if (btnKbCreate) btnKbCreate.addEventListener("click", () => { if (!btnKbCreate.disabled) openKbCreate(); });
+if (btnKbCreateClose) btnKbCreateClose.addEventListener("click", closeKbCreate);
+if (btnKbCreateSave) btnKbCreateSave.addEventListener("click", saveKbCreate);
 
 (function initKbDropZone() {
     var zone = document.getElementById("project-kb-group");
@@ -487,9 +510,20 @@ function toggleAgentDropdown() {
     }
 }
 
+async function fetchContextAgents() {
+    if (currentProjectId) {
+        const r = await fetch("/api/projects/" + currentProjectId + "/agents");
+        return r.ok ? await r.json() : [];
+    }
+    const r = await fetch("/api/agents");
+    return r.ok ? await r.json() : [];
+}
+
 async function openAgentDropdown() {
-    const resp = await fetch("/api/agents");
-    cachedAgents = resp.ok ? await resp.json() : [];
+    cachedAgents = await fetchContextAgents();
+    if (agentDropdownManageLabel) {
+        agentDropdownManageLabel.textContent = currentProjectId ? "管理智能体（项目专有）" : "管理智能体";
+    }
     renderAgentDropdown();
     agentSelector.classList.add("open");
 }
@@ -501,17 +535,19 @@ function closeAgentDropdown() {
 function renderAgentDropdown() {
     agentDropdownList.innerHTML = "";
 
-    const defaultItem = document.createElement("div");
-    defaultItem.className = "agent-dropdown-item" + (!currentAgentId ? " active" : "");
-    defaultItem.innerHTML =
-        '<div class="agent-dropdown-item-avatar">' + DROPDOWN_AVATAR_SVG + '</div>' +
-        '<div class="agent-dropdown-item-info">' +
-        '<div class="agent-dropdown-item-name">通用助手</div>' +
-        '<div class="agent-dropdown-item-model">全局模型</div>' +
-        '</div>' +
-        '<div class="agent-dropdown-item-check">' + CHECK_SVG + '</div>';
-    defaultItem.addEventListener("click", () => { selectAgent(null); closeAgentDropdown(); });
-    agentDropdownList.appendChild(defaultItem);
+    if (!currentProjectId) {
+        const defaultItem = document.createElement("div");
+        defaultItem.className = "agent-dropdown-item" + (!currentAgentId ? " active" : "");
+        defaultItem.innerHTML =
+            '<div class="agent-dropdown-item-avatar">' + DROPDOWN_AVATAR_SVG + '</div>' +
+            '<div class="agent-dropdown-item-info">' +
+            '<div class="agent-dropdown-item-name">通用助手</div>' +
+            '<div class="agent-dropdown-item-model">全局模型</div>' +
+            '</div>' +
+            '<div class="agent-dropdown-item-check">' + CHECK_SVG + '</div>';
+        defaultItem.addEventListener("click", () => { selectAgent(null); closeAgentDropdown(); });
+        agentDropdownList.appendChild(defaultItem);
+    }
 
     cachedAgents.forEach(a => {
         const item = document.createElement("div");
@@ -575,8 +611,7 @@ async function selectAgent(agentId) {
 }
 
 async function loadAgentBar() {
-    const resp = await fetch("/api/agents");
-    cachedAgents = resp.ok ? await resp.json() : [];
+    cachedAgents = await fetchContextAgents();
     const curResp = await fetch("/api/current-agent");
     const cur = curResp.ok ? await curResp.json() : {};
     currentAgentId = cur.agent_id || null;
@@ -585,6 +620,14 @@ async function loadAgentBar() {
 }
 
 // ==================== 智能体管理面板 ====================
+function agentApiBase() {
+    return currentProjectId ? "/api/projects/" + currentProjectId + "/agents" : "/api/agents";
+}
+
+function isProjectAgentContext() {
+    return !!currentProjectId;
+}
+
 async function openAgentPanel() {
     if (Object.keys(providers).length === 0) await loadProviders();
     showAgentList();
@@ -599,9 +642,9 @@ async function showAgentList() {
     agentListView.style.display = "block";
     agentFormView.style.display = "none";
     agentFormActions.style.display = "none";
-    agentPanelTitle.textContent = "管理智能体";
+    agentPanelTitle.textContent = isProjectAgentContext() ? "管理智能体（项目专有）" : "管理智能体";
 
-    const resp = await fetch("/api/agents");
+    const resp = await fetch(agentApiBase());
     cachedAgents = resp.ok ? await resp.json() : [];
     agentGrid.innerHTML = "";
 
@@ -618,8 +661,10 @@ async function showAgentList() {
             : '<div class="agent-card-avatar">' + CARD_AVATAR_SVG + '</div>';
         const modelText = a.model ? a.model : "全局模型";
         const callableBadge = a.callable ? '<span class="callable-badge" title="可被调用: ' + escapeHtml(a.slug || '') + '">⚡</span>' : '';
+        const slugText = a.slug ? escapeHtml(a.slug) : '';
         card.innerHTML = avatarHTML +
             '<div class="agent-card-name">' + escapeHtml(a.name) + callableBadge + '</div>' +
+            '<div class="agent-card-slug">' + slugText + '</div>' +
             '<div class="agent-card-model">' + escapeHtml(modelText) + '</div>' +
             '<div class="agent-card-actions">' +
             '<button class="btn-edit-agent" title="编辑">✎</button>' +
@@ -632,7 +677,16 @@ async function showAgentList() {
         });
         card.querySelector(".btn-delete-agent").addEventListener("click", async e => {
             e.stopPropagation();
-            await fetch("/api/agents/" + a.id, { method: "DELETE" });
+            if (isProjectAgentContext() && cachedAgents.length <= 1) {
+                showToast("项目至少保留一个智能体", "error");
+                return;
+            }
+            const delResp = await fetch(agentApiBase() + "/" + a.id, { method: "DELETE" });
+            if (!delResp.ok) {
+                const e = await delResp.json().catch(() => ({}));
+                showToast(e.error || "删除失败", "error");
+                return;
+            }
             if (currentAgentId === a.id) await selectAgent(null);
             await showAgentList();
             updateSelectorButton();
@@ -832,13 +886,13 @@ async function saveAgent() {
     try {
         let resp;
         if (editingAgentId) {
-            resp = await fetch("/api/agents/" + editingAgentId, {
+            resp = await fetch(agentApiBase() + "/" + editingAgentId, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
             });
         } else {
-            resp = await fetch("/api/agents", {
+            resp = await fetch(agentApiBase(), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
@@ -846,7 +900,7 @@ async function saveAgent() {
         }
         if (resp.ok) {
             showToast(editingAgentId ? "已更新" : "已创建", "success");
-            const agentsResp = await fetch("/api/agents");
+            const agentsResp = await fetch(agentApiBase());
             cachedAgents = agentsResp.ok ? await agentsResp.json() : [];
             updateSelectorButton();
             await showAgentList();
@@ -1276,6 +1330,8 @@ async function saveApiConfig() {
 let convCache = [];
 let projectsCache = [];
 let editingProjectId = null;
+let pendingProjectAgents = [];
+let editingProjAgentId = null;
 let pendingKbFiles = [];
 let expandedProjects = {};
 let convSearchKeyword = "";
@@ -1464,9 +1520,170 @@ function renderProjects(groupedConvs, kw) {
     });
 }
 
+function getProjectAgentsLocal() {
+    return pendingProjectAgents;
+}
+
+function renderProjectAgents() {
+    if (!projectAgentList) return;
+    projectAgentList.innerHTML = "";
+    const agents = pendingProjectAgents || [];
+    if (agents.length === 0) {
+        const hint = document.createElement("div");
+        hint.className = "project-kb-empty";
+        hint.textContent = "暂无智能体";
+        projectAgentList.appendChild(hint);
+        return;
+    }
+    agents.forEach((a, idx) => {
+        const row = document.createElement("div");
+        row.className = "project-kb-item";
+        const modelText = a.model ? a.model : "跟随当前模型";
+        row.innerHTML =
+            '<span class="kb-item-name" title="' + escapeHtml(a.name) + '">' + escapeHtml(a.name) + (idx === 0 ? '（默认）' : '') + '</span>' +
+            '<span class="kb-item-size">' + escapeHtml(modelText) + '</span>' +
+            '<button class="kb-item-del kb-item-edit" title="编辑">✎</button>' +
+            '<button class="kb-item-del" title="删除">✕</button>';
+        row.querySelector(".kb-item-edit").addEventListener("click", () => openProjAgentForm(a));
+        row.querySelector(".kb-item-del:not(.kb-item-edit)").addEventListener("click", () => deleteProjAgent(a));
+        projectAgentList.appendChild(row);
+    });
+}
+
+async function loadProjectAgents() {
+    if (editingProjectId) {
+        try {
+            const r = await fetch("/api/projects/" + editingProjectId + "/agents");
+            pendingProjectAgents = r.ok ? await r.json() : [];
+        } catch (e) {
+            pendingProjectAgents = [];
+        }
+    }
+    renderProjectAgents();
+}
+
+async function buildProjAgentModelList(agent) {
+    let customModels = [];
+    try {
+        const resp = await fetch("/api/custom-models");
+        if (resp.ok) customModels = await resp.json();
+    } catch (e) {}
+    projAgentModel.innerHTML = '<option value="">跟随当前模型</option>';
+    customModels.forEach(m => {
+        const key = m.provider + "|" + m.model;
+        const opt = document.createElement("option");
+        opt.value = key;
+        opt.dataset.baseUrl = m.base_url || "";
+        opt.textContent = m.name || m.model;
+        projAgentModel.appendChild(opt);
+    });
+    if (agent && agent.model) {
+        const wantKey = (agent.provider || "") + "|" + agent.model;
+        const match = Array.from(projAgentModel.options).find(o => o.value === wantKey);
+        projAgentModel.value = match ? wantKey : "";
+    } else {
+        projAgentModel.value = "";
+    }
+}
+
+async function openProjAgentForm(agent) {
+    editingProjAgentId = agent ? agent.id : null;
+    projAgentTitle.textContent = agent ? "编辑智能体" : "新增智能体";
+    projAgentName.value = agent ? (agent.name || "") : "";
+    projAgentPrompt.value = agent ? (agent.system_prompt || "") : "";
+    await buildProjAgentModelList(agent);
+    projAgentOverlay.classList.add("active");
+    setTimeout(() => projAgentName.focus(), 50);
+}
+
+function closeProjAgentForm() {
+    projAgentOverlay.classList.remove("active");
+    editingProjAgentId = null;
+}
+
+async function saveProjAgent() {
+    const name = projAgentName.value.trim();
+    if (!name) { showToast("请输入智能体名称", "error"); return; }
+    const opt = projAgentModel.options[projAgentModel.selectedIndex];
+    let provider = "", model = "", baseUrl = "";
+    if (projAgentModel.value) {
+        const parts = projAgentModel.value.split("|");
+        provider = parts[0] || "";
+        model = parts.slice(1).join("|") || "";
+        baseUrl = opt ? (opt.dataset.baseUrl || "") : "";
+    }
+    const payload = {
+        name: name,
+        system_prompt: projAgentPrompt.value,
+        provider: provider,
+        model: model,
+        base_url: baseUrl
+    };
+
+    if (editingProjectId) {
+        try {
+            let resp;
+            if (editingProjAgentId) {
+                resp = await fetch("/api/projects/" + editingProjectId + "/agents/" + editingProjAgentId, {
+                    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+                });
+            } else {
+                resp = await fetch("/api/projects/" + editingProjectId + "/agents", {
+                    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+                });
+            }
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                showToast(err.error || "保存失败", "error");
+                return;
+            }
+        } catch (e) {
+            showToast("保存失败: " + e.message, "error");
+            return;
+        }
+        await loadProjectAgents();
+        if (currentProjectId === editingProjectId) { cachedAgents = await fetchContextAgents(); updateSelectorButton(); }
+    } else {
+        if (editingProjAgentId) {
+            const tgt = pendingProjectAgents.find(a => a.id === editingProjAgentId);
+            if (tgt) Object.assign(tgt, payload);
+        } else {
+            pendingProjectAgents.push(Object.assign({ id: "_p" + Date.now() + Math.random().toString(36).slice(2, 6) }, payload));
+        }
+        renderProjectAgents();
+    }
+    showToast("已保存", "success");
+    closeProjAgentForm();
+}
+
+async function deleteProjAgent(agent) {
+    if ((pendingProjectAgents || []).length <= 1) {
+        showToast("项目至少保留一个智能体", "error");
+        return;
+    }
+    const ok = await confirmDialog("删除智能体「" + (agent.name || "") + "」？", { title: "删除智能体", icon: "\u{1F5D1}\uFE0F", okText: "删除" });
+    if (!ok) return;
+    if (editingProjectId && !String(agent.id).startsWith("_p")) {
+        const resp = await fetch("/api/projects/" + editingProjectId + "/agents/" + agent.id, { method: "DELETE" });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            showToast(err.error || "删除失败", "error");
+            return;
+        }
+        await loadProjectAgents();
+        if (currentProjectId === editingProjectId) { cachedAgents = await fetchContextAgents(); updateSelectorButton(); }
+    } else {
+        pendingProjectAgents = pendingProjectAgents.filter(a => a.id !== agent.id);
+        renderProjectAgents();
+    }
+    showToast("已删除", "success");
+}
+
 async function openProjectModal(project) {
     editingProjectId = project ? project.id : null;
     pendingKbFiles = [];
+    pendingProjectAgents = [];
+    editingProjAgentId = null;
     projectPanelTitle.textContent = project ? "编辑项目" : "新建项目";
     projectName.value = project ? (project.name || "") : "";
     projectPrompt.value = project ? (project.system_prompt || "") : "";
@@ -1474,6 +1691,14 @@ async function openProjectModal(project) {
     await buildProjectModelList(project);
 
     renderProjectKb(project);
+
+    if (editingProjectId) {
+        await loadProjectAgents();
+    } else {
+        pendingProjectAgents = [{ id: "_p" + Date.now(), name: "通用助手", system_prompt: "", model: "", provider: "", base_url: "" }];
+        renderProjectAgents();
+    }
+
     projectOverlay.classList.add("active");
     projectName.focus();
 }
@@ -1482,6 +1707,8 @@ function closeProjectModal() {
     projectOverlay.classList.remove("active");
     editingProjectId = null;
     pendingKbFiles = [];
+    pendingProjectAgents = [];
+    editingProjAgentId = null;
 }
 
 async function buildProjectModelList(project) {
@@ -1497,6 +1724,15 @@ async function saveProject() {
     };
     if (pendingKbFiles.length > 0) {
         payload.files = pendingKbFiles.map(pf => ({ name: pf.name, content: pf.content }));
+    }
+    if (!editingProjectId) {
+        payload.agents = pendingProjectAgents.map(a => ({
+            name: a.name,
+            system_prompt: a.system_prompt || "",
+            model: a.model || "",
+            provider: a.provider || "",
+            base_url: a.base_url || ""
+        }));
     }
     try {
         let resp;
@@ -1522,6 +1758,7 @@ async function saveProject() {
                 editingProjectId = saved.id;
                 pendingKbFiles = [];
                 await renderProjectKb(saved);
+                await loadProjectAgents();
                 return;
             }
             closeProjectModal();
@@ -1590,6 +1827,67 @@ async function renderProjectKb(project) {
     } catch (e) {
         renderKbItems([]);
     }
+}
+
+function openKbCreate() {
+    kbCreateName.value = "";
+    kbCreateContent.value = "";
+    kbCreateOverlay.classList.add("active");
+    setTimeout(() => kbCreateName.focus(), 50);
+}
+
+function closeKbCreate() {
+    kbCreateOverlay.classList.remove("active");
+}
+
+function normalizeKbFileName(raw) {
+    let name = (raw || "").trim();
+    if (!name) name = "未命名.txt";
+    if (!name.includes(".")) name += ".txt";
+    return name.slice(0, 120);
+}
+
+async function saveKbCreate() {
+    const name = normalizeKbFileName(kbCreateName.value);
+    const content = kbCreateContent.value;
+    if (!content.trim()) { showToast("文件内容不能为空", "error"); return; }
+    const byteLen = new Blob([content]).size;
+    if (byteLen > 1024 * 1024) { showToast("文件过大，单个文件请控制在 1MB 文本以内", "error"); return; }
+
+    if (editingProjectId) {
+        try {
+            const existingResp = await fetch("/api/projects/" + editingProjectId + "/files");
+            const existingFiles = existingResp.ok ? await existingResp.json() : [];
+            if (existingFiles.find(ef => ef.name === name)) { showToast(name + "：已存在", "info"); return; }
+        } catch (e) {}
+        try {
+            const resp = await fetch("/api/projects/" + editingProjectId + "/files", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: name, content: content })
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                showToast(name + "：" + (err.error || "保存失败"), "error");
+                return;
+            }
+        } catch (e) {
+            showToast("保存失败: " + e.message, "error");
+            return;
+        }
+        showToast("已保存到知识库", "success");
+        const proj = projectsCache.find(p => p.id === editingProjectId) || { id: editingProjectId };
+        await renderProjectKb(proj);
+    } else {
+        const KB_MAX_TOTAL = 5 * 1024 * 1024;
+        if (pendingKbFiles.find(pf => pf.name === name)) { showToast(name + "：已存在", "info"); return; }
+        const totalSize = pendingKbFiles.reduce((sum, pf) => sum + (pf._rawSize || 0), 0);
+        if (totalSize + byteLen > KB_MAX_TOTAL) { showToast("知识库总大小不能超过 5MB", "error"); return; }
+        pendingKbFiles.push({ _pendingId: Date.now() + "-" + Math.random().toString(36).slice(2, 8), name: name, content: content, size: content.length, _rawSize: byteLen });
+        showToast("已添加（保存项目后生效）", "success");
+        renderPendingKbItems();
+    }
+    closeKbCreate();
 }
 
 function renderPendingKbItems() {
@@ -1847,6 +2145,11 @@ async function createNewConversation(projectId) {
     });
     const conv = await resp.json();
     currentConvId = conv.id;
+    currentProjectId = projectId || null;
+    currentAgentId = (conv.agent_id !== undefined) ? conv.agent_id : currentAgentId;
+    cachedAgents = await fetchContextAgents();
+    updateSelectorButton();
+    await syncQuickModelToAgent();
     if (projectId) expandedProjects[projectId] = true;
     await loadConversations();
     showWelcome();
@@ -1889,7 +2192,7 @@ async function switchConversation(cid) {
             if (role === "user") convUserCount++;
             let text = typeof m.content === "string" ? m.content : (m.content.find(c => c.type === "text") || {}).text || "";
             if (role === "user" && typeof text === "string" && text.startsWith("[[ASK_ANSWER]]")) {
-                const target = lastAiBubble || addMessage("ai", "");
+                const target = lastAiBubble || addMessage("ai", "", [], [], undefined, currentAgentId);
                 renderAskSummaryCard(target, text.slice("[[ASK_ANSWER]]".length));
                 return;
             }
@@ -1913,8 +2216,15 @@ async function switchConversation(cid) {
                     }
                 }
             }
-            const renderedBubble = addMessage(role, text, imgs, historyDocs, thisUserIndex);
-            if (role === "ai") {
+            const msgAgentId = (m.agent_id !== undefined && m.agent_id !== null) ? m.agent_id : null;
+            let renderedBubble;
+            if (m.agent_call) {
+                addAgentCallMessage(m.agent_call.slug || "", m.agent_call.name || "", text);
+                renderedBubble = chatArea.lastElementChild;
+            } else {
+                renderedBubble = addMessage(role, text, imgs, historyDocs, thisUserIndex, role === "ai" ? msgAgentId : null);
+            }
+            if (role === "ai" && !m.agent_call) {
                 lastAiBubble = renderedBubble;
                 const aiMsgDiv = renderedBubble.closest(".message");
                 attachAiActions(aiMsgDiv, text, { allowRegen: false, ts: m.ts });
@@ -1929,12 +2239,15 @@ async function switchConversation(cid) {
     }
     isBatchRendering = false;
     chatArea.scrollTop = chatArea.scrollHeight;
+    _syncAllAiAvatars();
 
     const convResp = await fetch("/api/conversations");
     const list = await convResp.json();
     const conv = list.find(c => c.id === cid);
     headerTitle.textContent = conv ? conv.title : "AI Chat";
 
+    currentProjectId = (conv && conv.project_id) ? conv.project_id : null;
+    cachedAgents = await fetchContextAgents();
     if (conv && conv.agent_id !== undefined) {
         currentAgentId = conv.agent_id;
         await fetch("/api/current-agent", {
@@ -2021,7 +2334,7 @@ async function pollImageGeneration(cid) {
             if (pollBubbleMsg) pollBubbleMsg.remove();
             const text = typeof content === "string" ? content : (content.find(c => c.type === "text") || {}).text || "";
             const imgs = Array.isArray(content) ? content.filter(c => c.type === "image_url").map(c => c.image_url.url) : [];
-            const newBubble = addMessage("ai", text, imgs);
+            const newBubble = addMessage("ai", text, imgs, [], undefined, currentAgentId);
             const newMsg = newBubble.closest(".message");
             attachAiActions(newMsg, text, { allowRegen: true, ts: ts || Math.floor(Date.now() / 1000) });
             chatArea.scrollTop = chatArea.scrollHeight;
@@ -2128,6 +2441,15 @@ async function attachToActiveStream(cid) {
                         break;
                     }
                     if (parsed.replace) { fullText = parsed.replace; rerender(); }
+                    if (parsed.agent_call_start) {
+                        _startAgentStream(parsed.agent_call_start.slug || "", parsed.agent_call_start.name || "", !!parsed.agent_call_start.is_image);
+                    }
+                    if (parsed.agent_call_chunk) {
+                        _appendAgentChunk(parsed.agent_call_chunk.slug || "", parsed.agent_call_chunk.content || "");
+                    }
+                    if (parsed.agent_call_end) {
+                        _endAgentStream(parsed.agent_call_end.slug || "");
+                    }
                     if (parsed.reasoning_start) isReasoning = true;
                     if (parsed.reasoning) { reasoningText += parsed.reasoning; rerender(); }
                     if (parsed.reasoning_end) { isReasoning = false; rerender(); }
@@ -2274,13 +2596,28 @@ function _makeImgWrap(src, allSrcs) {
     return wrap;
 }
 
-function addMessage(role, content, images, docs, userIndex) {
+function addMessage(role, content, images, docs, userIndex, agentId) {
     hideWelcome();
     const div = document.createElement("div");
     div.className = "message " + role;
     const avatar = document.createElement("div");
     avatar.className = "avatar";
-    avatar.textContent = role === "user" ? "U" : "AI";
+    if (role === "user") {
+        avatar.textContent = "U";
+    } else {
+        const lookupId = (agentId !== undefined && agentId !== null) ? agentId : "";
+        const curAgent = (typeof cachedAgents !== "undefined" && cachedAgents && lookupId)
+            ? cachedAgents.find(a => a.id === lookupId) : null;
+        if (curAgent && curAgent.avatar) {
+            avatar.innerHTML = '<img src="' + curAgent.avatar + '" alt="">';
+            avatar.title = curAgent.name || "";
+        } else {
+            avatar.textContent = "AI";
+        }
+        if (lookupId) {
+            div.dataset.agentId = lookupId;
+        }
+    }
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     if (role === "ai") {
@@ -2429,7 +2766,18 @@ function addAiBubble() {
     div.className = "message ai";
     const avatar = document.createElement("div");
     avatar.className = "avatar";
-    avatar.textContent = "AI";
+    const _aid = currentAgentId || "";
+    const _ag = (typeof cachedAgents !== "undefined" && cachedAgents && _aid)
+        ? cachedAgents.find(a => a.id === _aid) : null;
+    if (_ag && _ag.avatar) {
+        avatar.innerHTML = '<img src="' + _ag.avatar + '" alt="">';
+        avatar.title = _ag.name || "";
+    } else {
+        avatar.textContent = "AI";
+    }
+    if (_aid) {
+        div.dataset.agentId = _aid;
+    }
     const bubble = document.createElement("div");
     bubble.className = "bubble streaming";
     const cursor = document.createElement("span");
@@ -3336,6 +3684,16 @@ async function sendMessage(presetText, opts) {
                         }
                         if (shouldAutoScroll()) chatArea.scrollTop = chatArea.scrollHeight;
                     }
+                    if (parsed.agent_call_start) {
+                        _startAgentStream(parsed.agent_call_start.slug || "", parsed.agent_call_start.name || "", !!parsed.agent_call_start.is_image);
+                        if (shouldAutoScroll()) chatArea.scrollTop = chatArea.scrollHeight;
+                    }
+                    if (parsed.agent_call_chunk) {
+                        _appendAgentChunk(parsed.agent_call_chunk.slug || "", parsed.agent_call_chunk.content || "");
+                    }
+                    if (parsed.agent_call_end) {
+                        _endAgentStream(parsed.agent_call_end.slug || "");
+                    }
                     if (parsed.reasoning_start) {
                         isReasoning = true;
                     }
@@ -3407,6 +3765,7 @@ async function sendMessage(presetText, opts) {
         }
     } finally {
         streamEnded = true;
+        _syncAllAiAvatars();
         if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
         if (cursor.parentNode) cursor.remove();
         if (currentAbort === abortCtrl) {
@@ -3910,6 +4269,106 @@ async function regenerateLastMessage() {
     pendingImages = savedPendingImages.length ? savedPendingImages : pendingImages;
 }
 
+
+const _activeAgentStreams = {};
+
+function _getAgentAvatarEl(slug, name) {
+    const el = document.createElement("div");
+    el.className = "avatar agent-avatar";
+    const calledAgent = (typeof cachedAgents !== "undefined" && cachedAgents) ? cachedAgents.find(a => a.slug === slug || a.name === name) : null;
+    if (calledAgent && calledAgent.avatar) {
+        el.innerHTML = '<img src="' + calledAgent.avatar + '" alt="">';
+        el.title = calledAgent.name || slug || "智能体";
+    } else {
+        const initials = (name || slug || "?").split(/[-_\s]+/).map(w => w[0] || "").join("").slice(0, 2).toUpperCase();
+        el.textContent = initials;
+        el.title = name || slug || "智能体";
+    }
+    return el;
+}
+
+function _startAgentStream(slug, name, isImage) {
+    hideWelcome();
+    const div = document.createElement("div");
+    div.className = "message ai agent-call streaming";
+    const avatar = _getAgentAvatarEl(slug, name);
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    if (isImage) {
+        showImageLoading(bubble, null);
+    } else {
+        const cursor = document.createElement("span");
+        cursor.className = "cursor";
+        bubble.appendChild(cursor);
+    }
+    const label = document.createElement("div");
+    label.className = "agent-call-label";
+    const displayName = ((typeof cachedAgents !== "undefined" && cachedAgents) ? cachedAgents.find(a => a.slug === slug) : null)?.name || name || slug;
+    label.textContent = "via " + displayName;
+    div.appendChild(avatar);
+    div.appendChild(bubble);
+    div.appendChild(label);
+    chatArea.appendChild(div);
+    _activeAgentStreams[slug] = { div, bubble, cursor: isImage ? null : bubble.querySelector(".cursor"), text: "", slug, name, isImage };
+}
+
+function _appendAgentChunk(slug, content) {
+    const st = _activeAgentStreams[slug];
+    if (!st) return;
+    st.text += content;
+    if (!st.isImage) {
+        st.bubble.innerHTML = renderMarkdown(st.text);
+        st.bubble.appendChild(st.cursor);
+    }
+    if (!userScrolledUp && (chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 30)) {
+        chatArea.scrollTop = chatArea.scrollHeight;
+    }
+}
+
+function _endAgentStream(slug) {
+    const st = _activeAgentStreams[slug];
+    if (!st) return;
+    if (st.cursor && st.cursor.parentNode) st.cursor.remove();
+    removeImageLoading(st.bubble);
+    if (st.isImage) {
+        const urls = _extractImageUrlsFromMd(st.text);
+        if (urls.length) appendBubbleImages(st.bubble, urls);
+        else st.bubble.innerHTML = renderMarkdown(st.text);
+    }
+    st.div.classList.remove("streaming");
+    delete _activeAgentStreams[slug];
+}
+
+function _extractImageUrlsFromMd(text) {
+    const urls = [];
+    const re = /!\[.*?\]\((data:image\/[^)]+|https?:\/\/[^)]+)\)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) urls.push(m[1]);
+    return urls;
+}
+
+function addAgentCallMessage(slug, name, content) {
+    hideWelcome();
+    const div = document.createElement("div");
+    div.className = "message ai agent-call";
+    div.appendChild(_getAgentAvatarEl(slug, name));
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    const imgUrls = _extractImageUrlsFromMd(content);
+    if (imgUrls.length) {
+        appendBubbleImages(bubble, imgUrls);
+    } else {
+        bubble.innerHTML = renderMarkdown(content);
+    }
+    const label = document.createElement("div");
+    label.className = "agent-call-label";
+    const displayName = ((typeof cachedAgents !== "undefined" && cachedAgents) ? cachedAgents.find(a => a.slug === slug) : null)?.name || name || slug;
+    label.textContent = "via " + displayName;
+    div.appendChild(bubble);
+    div.appendChild(label);
+    chatArea.appendChild(div);
+}
+
 function renderCallBlocks(text) {
     const regex = /\[CALL:(\S+?)\]([\s\S]*?)\[\/CALL\]/g;
     const parts = [];
@@ -3939,7 +4398,6 @@ function renderCallBlocks(text) {
             const header = document.createElement("div");
             header.className = "agent-call-header";
             header.innerHTML = '<span class="call-arrow">▶</span> 调用智能体 <span class="call-agent-name">' + escapeHtml(p.slug) + '</span>';
-            header.addEventListener("click", () => block.classList.toggle("expanded"));
             const body = document.createElement("div");
             body.className = "agent-call-body";
             body.textContent = p.content;
@@ -3951,10 +4409,38 @@ function renderCallBlocks(text) {
     return container;
 }
 
+if (chatArea && !chatArea._callDelegationBound) {
+    chatArea._callDelegationBound = true;
+    chatArea.addEventListener("click", (e) => {
+        const header = e.target.closest(".agent-call-header");
+        if (!header) return;
+        const block = header.closest(".agent-call-block");
+        if (block) block.classList.toggle("expanded");
+    });
+}
+
+
+function _syncAllAiAvatars() {
+    if (!cachedAgents || !cachedAgents.length) return;
+    document.querySelectorAll(".message.ai").forEach(msgEl => {
+        const el = msgEl.querySelector(".avatar");
+        if (!el) return;
+        if (el.querySelector("img")) return;
+        if (el.textContent.trim() !== "AI") return;
+        const lookupId = msgEl.dataset.agentId || "";
+        if (!lookupId) return;
+        const agent = cachedAgents.find(a => a.id === lookupId);
+        if (agent && agent.avatar) {
+            el.innerHTML = '<img src="' + agent.avatar + '" alt="">';
+            el.title = agent.name || "";
+        }
+    });
+}
+
 // ==================== 初始化 ====================
 loadConversations();
 buildQuickModelList();
-loadAgentBar();
+loadAgentBar().then(() => _syncAllAiAvatars());
 
 // ==================== 侧边栏宽度拖拽 ====================
 (function setupSidebarResizer() {

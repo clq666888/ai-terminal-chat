@@ -626,6 +626,14 @@ body.resizing .sidebar {
     color: var(--accent);
 }
 
+.message.ai .avatar > img,
+.agent-avatar > img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: inherit;
+}
+
 .bubble {
     max-width: 82%;
     padding: 10px 16px;
@@ -636,6 +644,35 @@ body.resizing .sidebar {
     white-space: pre-wrap;
 }
 
+
+/* 智能体互调 - 独立消息气泡 */
+.message.agent-call {
+    margin-top: 4px;
+    align-items: flex-start;
+}
+
+.message.agent-call .agent-avatar {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}
+
+.message.agent-call .bubble {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+}
+
+.message.agent-call .agent-call-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: 44px;
+    margin-top: 2px;
+    padding-bottom: 4px;
+}
 .message.user .bubble {
     background: var(--bg-user-msg);
     color: #fff;
@@ -1850,6 +1887,20 @@ body.resizing .sidebar {
     font-size: 13px;
     color: var(--text-primary);
     text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.agent-card-slug {
+    min-height: 14px;
+    margin-top: 3px;
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--accent);
+    text-align: center;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3898,4 +3949,8 @@ body.resizing .sidebar {
 .btn-token-stats:hover {
     background: var(--accent);
     color: #fff;
+}
+
+#kb-create-overlay {
+    z-index: 300;
 }

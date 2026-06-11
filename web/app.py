@@ -226,14 +226,34 @@ def _save_config(cfg):
         pass
 
 
+def _make_default_project_agent():
+    return {
+        "id": str(uuid.uuid4())[:8],
+        "name": "通用助手",
+        "avatar": "",
+        "system_prompt": "",
+        "model": "",
+        "provider": "",
+        "base_url": "",
+        "callable": False,
+        "slug": "",
+        "when_to_call": "",
+        "created": time.time()
+    }
+
+
 def _load_projects():
+    data = []
     if os.path.exists(PROJECTS_FILE):
         try:
             with open(PROJECTS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except Exception:
-            pass
-    return []
+            data = []
+    for proj in data:
+        if not isinstance(proj.get("agents"), list) or not proj.get("agents"):
+            proj["agents"] = [_make_default_project_agent()]
+    return data
 
 
 def _save_projects(projects):
@@ -424,7 +444,31 @@ def _get_agent(agent_id):
     for a in agents_list:
         if a["id"] == agent_id:
             return a
+    for proj in projects_list:
+        for a in (proj.get("agents") or []):
+            if a.get("id") == agent_id:
+                return a
     return None
+
+
+def _get_project_agents(project_id):
+    project = _get_project(project_id)
+    if not project:
+        return []
+    return project.get("agents") or []
+
+
+def _get_default_project_agent_id(project_id):
+    agents = _get_project_agents(project_id)
+    return agents[0]["id"] if agents else None
+
+
+def _agent_belongs_to_scope(agent_id, project_id):
+    if not agent_id:
+        return True
+    if project_id:
+        return any(a.get("id") == agent_id for a in _get_project_agents(project_id))
+    return any(a.get("id") == agent_id for a in agents_list)
 
 
 def _get_project(project_id):
@@ -436,11 +480,15 @@ def _get_project(project_id):
     return None
 
 
-def _get_system_content(agent_id=None):
+def _get_system_content(agent_id=None, project_id=None):
+    parts = []
     agent = _get_agent(agent_id)
     if agent and agent.get("system_prompt"):
-        return agent["system_prompt"]
-    return ""
+        parts.append(agent["system_prompt"].strip())
+    project = _get_project(project_id)
+    if project and project.get("system_prompt") and project["system_prompt"].strip():
+        parts.append("【项目背景】" + project["system_prompt"].strip())
+    return "\n\n".join(parts)
 
 
 def _get_chat_config(agent_id=None):
@@ -473,9 +521,9 @@ def _build_callable_prompt(callable_agents):
     lines = ["\n\n你可以调用以下智能体来协助完成任务："]
     for a in callable_agents:
         lines.append(f"- {a['slug']}（{a['name']}）: {a.get('when_to_call', '')}")
-    lines.append("\n调用格式：在回复中使用 [CALL:英文标识名] 你要交给该智能体的具体任务描述 [/CALL]")
-    lines.append("你可以在一次回复中调用多个智能体。调用结果会自动返回给你，你再整合后回复用户。")
-    lines.append("如果不需要调用任何智能体，直接回复用户即可。")
+    lines.append("\n【重要】当需要某个智能体协助时，你必须使用 [CALL:英文标识名] 具体任务描述 [/CALL] 格式来触发实际调用。")
+    lines.append("⚠️ 绝对不要自己扮演或模拟被调用智能体的回复——系统会自动执行调用并将真实结果返回给你。")
+    lines.append("如果你假装是被调用智能体在说话，用户将无法获得真实的子智能体能力。")
     return "\n".join(lines)
 
 
@@ -767,11 +815,13 @@ def _parse_ask_block(text):
     return clean, prefix
 
 
-def _execute_agent_calls(text):
-    pattern = r"\[CALL:(\S+?)\]([\s\S]*?)\[/CALL\]"
+def _execute_agent_calls_stream(text, history, conv):
+    pattern = r"\[CALL:(\S+?)\]([\s\S]*?)\[\/CALL\]"
     matches = re.findall(pattern, text)
     if not matches:
-        return text
+        return
+    agent_accumulated = {}
+
 
     for slug, task_content in matches:
         task_content = task_content.strip()
@@ -780,15 +830,79 @@ def _execute_agent_calls(text):
             if a.get("slug") == slug and a.get("callable"):
                 agent = a
                 break
+        agent_name = agent.get("name", slug) if agent else slug
+
         if not agent:
-            result = f"[错误: 未找到智能体 {slug}]"
-        else:
-            try:
-                sub_cfg = _get_chat_config(agent["id"])
-                sub_history = []
-                if agent.get("system_prompt"):
-                    sub_history.append({"role": "system", "content": agent["system_prompt"]})
-                sub_history.append({"role": "user", "content": task_content})
+            err_msg = f"[错误: 未找到智能体 {slug}]"
+            chunk_data = json.dumps({"agent_call_chunk": {"slug": slug, "content": err_msg}}, ensure_ascii=False)
+            yield f"data: {chunk_data}\n\n"
+            end_data = json.dumps({"agent_call_end": {"slug": slug}}, ensure_ascii=False)
+            yield f"data: {end_data}\n\n"
+            history.append({"role": "assistant", "content": err_msg, "ts": int(time.time()), "agent_call": {"slug": slug, "name": agent_name}})
+            _save_conversations()
+            escaped_slug = re.escape(slug)
+            block_pattern = f"\\[CALL:{escaped_slug}\\][\\s\\S]*?\\[\\/CALL\\]"
+            text = re.sub(block_pattern, "", text, count=1)
+            continue
+
+        try:
+            sub_cfg = _get_chat_config(agent["id"])
+            sub_history = []
+            if agent.get("system_prompt"):
+                sub_history.append({"role": "system", "content": agent["system_prompt"]})
+            sub_kb = _build_project_kb_prompt(conv.get("project_id"))
+            if sub_kb:
+                sub_history.append({"role": "system", "content": sub_kb.strip()})
+            sub_history.append({"role": "user", "content": task_content})
+
+            start_data = json.dumps({"agent_call_start": {"slug": slug, "name": agent_name, "is_image": _is_image_model(sub_cfg.get("model", ""))}}, ensure_ascii=False)
+            yield f"data: {start_data}\n\n"
+
+            if _is_image_model(sub_cfg.get("model", "")):
+                img_resp = _request_image_generation(sub_cfg, sub_history)
+                if img_resp.status_code != 200:
+                    upstream_msg = ""
+                    try:
+                        eb = img_resp.json()
+                        eo = eb.get("error", eb) if isinstance(eb, dict) else eb
+                        if isinstance(eo, dict):
+                            upstream_msg = str(eo.get("message") or "")
+                        elif isinstance(eo, str):
+                            upstream_msg = eo
+                    except Exception:
+                        try:
+                            upstream_msg = (img_resp.text or "")[:300]
+                        except Exception:
+                            upstream_msg = ""
+                    result = f"[生图失败: HTTP {img_resp.status_code} - {upstream_msg}]" if upstream_msg else f"[生图失败: HTTP {img_resp.status_code}]"
+                else:
+                    try:
+                        jd = img_resp.json()
+                        message = jd["choices"][0]["message"]
+                    except Exception:
+                        message = {}
+                        jd = {}
+                    text_content = (message.get("content") or "").strip()
+                    img_urls = _extract_message_images(message)
+                    if not img_urls and isinstance(jd.get("data"), list):
+                        for it in jd["data"]:
+                            if isinstance(it, dict):
+                                u = it.get("url") or ""
+                                b64 = it.get("b64_json") or ""
+                                if u:
+                                    img_urls.append(u)
+                                elif b64:
+                                    img_urls.append("data:image/png;base64," + b64)
+                    parts = []
+                    if text_content:
+                        parts.append(text_content)
+                    for u in img_urls:
+                        parts.append(f"![image]({u})")
+                    result = "\n\n".join(parts) if parts else "[生图返回为空]"
+                agent_accumulated[slug] = result
+                chunk_data = json.dumps({"agent_call_chunk": {"slug": slug, "content": result}}, ensure_ascii=False)
+                yield f"data: {chunk_data}\n\n"
+            else:
                 resp = send_chat_request(
                     sub_cfg["base_url"],
                     sub_cfg["api_key"],
@@ -796,35 +910,66 @@ def _execute_agent_calls(text):
                     sub_cfg["model"]
                 )
                 if resp.status_code != 200:
-                    result = f"[调用失败: HTTP {resp.status_code}]"
+                    upstream_msg = ""
+                    try:
+                        err_json = resp.json()
+                        err_obj = err_json.get("error", err_json)
+                        if isinstance(err_obj, dict):
+                            upstream_msg = str(err_obj.get("message") or "")
+                        elif isinstance(err_obj, str):
+                            upstream_msg = err_obj
+                    except Exception:
+                        try:
+                            upstream_msg = (resp.text or "")[:300]
+                        except Exception:
+                            upstream_msg = ""
+                    err_text = f"[调用失败: HTTP {resp.status_code} - {upstream_msg}]" if upstream_msg else f"[调用失败: HTTP {resp.status_code}]"
+                    agent_accumulated[slug] = err_text
+                    chunk_data = json.dumps({"agent_call_chunk": {"slug": slug, "content": err_text}}, ensure_ascii=False)
+                    yield f"data: {chunk_data}\n\n"
                 else:
-                    sub_reply = ""
+                    has_content = False
                     for line in resp.iter_lines(decode_unicode=True):
                         chunk = parse_stream_chunk(line)
                         if chunk is None:
                             break
                         if chunk:
-                            sub_reply += chunk
-                    result = sub_reply if sub_reply else "[智能体无回复]"
-            except Exception as e:
-                result = f"[调用异常: {str(e)}]"
+                            has_content = True
+                            agent_accumulated[slug] = agent_accumulated.get(slug, "") + chunk
+                            chunk_data = json.dumps({"agent_call_chunk": {"slug": slug, "content": chunk}}, ensure_ascii=False)
+                            yield f"data: {chunk_data}\n\n"
+                    if not has_content:
+                        agent_accumulated[slug] = "[智能体无回复]"
+                        chunk_data = json.dumps({"agent_call_chunk": {"slug": slug, "content": "[智能体无回复]"}}, ensure_ascii=False)
+                        yield f"data: {chunk_data}\n\n"
+        except Exception as e:
+            err_text = f"[调用异常: {str(e)}]"
+            agent_accumulated[slug] = err_text
+            chunk_data = json.dumps({"agent_call_chunk": {"slug": slug, "content": err_text}}, ensure_ascii=False)
+            yield f"data: {chunk_data}\n\n"
 
-        old_block = f"[CALL:{slug}]{task_content}[/CALL]"
-        # 用正则精确匹配（因为 task_content 可能有换行）
+        end_data = json.dumps({"agent_call_end": {"slug": slug}}, ensure_ascii=False)
+        yield f"data: {end_data}\n\n"
+
+        sub_content = agent_accumulated.get(slug, "")
+        now_ts = int(time.time())
+        history.append({"role": "assistant", "content": sub_content, "ts": now_ts, "agent_call": {"slug": slug, "name": agent_name}})
+        conv["updated"] = time.time()
+        _save_conversations()
+
         escaped_slug = re.escape(slug)
-        block_pattern = f"\\[CALL:{escaped_slug}\\][\\s\\S]*?\\[/CALL\\]"
-        text = re.sub(block_pattern, f"[CALL:{slug}]{result}[/CALL]", text, count=1)
+        block_pattern = f"\\[CALL:{escaped_slug}\\][\\s\\S]*?\\[\\/CALL\\]"
+        text = re.sub(block_pattern, "", text, count=1)
 
     return text
 
-
 def _new_conversation(agent_id=None, project_id=None):
     cid = str(uuid.uuid4())[:8]
-    project = _get_project(project_id)
-    if project and project.get("system_prompt"):
-        system_content = project["system_prompt"]
-    else:
-        system_content = _get_system_content(agent_id)
+    if not _agent_belongs_to_scope(agent_id, project_id):
+        agent_id = None
+    if project_id and not agent_id:
+        agent_id = _get_default_project_agent_id(project_id)
+    system_content = _get_system_content(agent_id, project_id)
     history = []
     if system_content:
         history.append({"role": "system", "content": system_content})
@@ -1259,10 +1404,18 @@ def create_project():
         if not fcontent.strip(): continue
         if len(fcontent.encode("utf-8")) > PROJECT_FILE_MAX_BYTES: continue
         saved_files.append({"id": str(uuid.uuid4())[:8], "name": fname, "content": fcontent})
+    raw_agents = data.get("agents")
+    if isinstance(raw_agents, list) and raw_agents:
+        proj_agents = _sanitize_project_agents(raw_agents)
+    else:
+        proj_agents = []
+    if not proj_agents:
+        proj_agents = [_make_default_project_agent()]
     project = {
         "id": str(uuid.uuid4())[:8],
         "name": name[:50],
         "system_prompt": data.get("system_prompt", ""),
+        "agents": proj_agents,
         "files": saved_files,
         "created": time.time(),
         "updated": time.time()
@@ -1282,6 +1435,10 @@ def update_project(project_id):
         project["name"] = (data["name"] or "").strip()[:50] or project["name"]
     if "system_prompt" in data:
         project["system_prompt"] = data["system_prompt"]
+    if "agents" in data and isinstance(data["agents"], list):
+        sanitized = _sanitize_project_agents(data["agents"])
+        if sanitized:
+            project["agents"] = sanitized
     if "provider" in data:
         project["provider"] = data["provider"]
     if "model" in data:
@@ -1312,6 +1469,104 @@ def delete_project(project_id):
             c["project_id"] = None
     _save_conversations()
     projects_list = [p for p in projects_list if p["id"] != project_id]
+    _save_projects(projects_list)
+    return jsonify({"status": "ok"})
+
+
+def _sanitize_project_agents(raw_agents):
+    result = []
+    for ra in raw_agents:
+        if not isinstance(ra, dict):
+            continue
+        nm = (ra.get("name") or "").strip()
+        if not nm:
+            continue
+        result.append({
+            "id": ra.get("id") or str(uuid.uuid4())[:8],
+            "name": nm[:50],
+            "avatar": ra.get("avatar", ""),
+            "system_prompt": ra.get("system_prompt", ""),
+            "model": ra.get("model", ""),
+            "provider": ra.get("provider", ""),
+            "base_url": ra.get("base_url", ""),
+            "callable": bool(ra.get("callable", False)),
+            "slug": ra.get("slug", ""),
+            "when_to_call": ra.get("when_to_call", ""),
+            "created": ra.get("created") or time.time()
+        })
+    return result
+
+
+@app.route("/api/projects/<project_id>/agents", methods=["GET"])
+def list_project_agents(project_id):
+    project = _get_project(project_id)
+    if not project:
+        return jsonify({"error": "项目不存在"}), 404
+    return jsonify(project.get("agents") or [])
+
+
+@app.route("/api/projects/<project_id>/agents", methods=["POST"])
+def create_project_agent(project_id):
+    project = _get_project(project_id)
+    if not project:
+        return jsonify({"error": "项目不存在"}), 404
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "名称不能为空"}), 400
+    agent = {
+        "id": str(uuid.uuid4())[:8],
+        "name": name[:50],
+        "avatar": data.get("avatar", ""),
+        "system_prompt": data.get("system_prompt", ""),
+        "model": data.get("model", ""),
+        "provider": data.get("provider", ""),
+        "base_url": data.get("base_url", ""),
+        "callable": bool(data.get("callable", False)),
+        "slug": data.get("slug", ""),
+        "when_to_call": data.get("when_to_call", ""),
+        "created": time.time()
+    }
+    if not isinstance(project.get("agents"), list):
+        project["agents"] = []
+    project["agents"].append(agent)
+    project["updated"] = time.time()
+    _save_projects(projects_list)
+    return jsonify(agent), 201
+
+
+@app.route("/api/projects/<project_id>/agents/<agent_id>", methods=["PUT"])
+def update_project_agent(project_id, agent_id):
+    project = _get_project(project_id)
+    if not project:
+        return jsonify({"error": "项目不存在"}), 404
+    agent = next((a for a in (project.get("agents") or []) if a.get("id") == agent_id), None)
+    if not agent:
+        return jsonify({"error": "智能体不存在"}), 404
+    data = request.get_json() or {}
+    for key in ("name", "avatar", "system_prompt", "model", "provider", "base_url", "slug", "when_to_call"):
+        if key in data:
+            agent[key] = data[key].strip() if (key == "name" and isinstance(data[key], str)) else data[key]
+    if "callable" in data:
+        agent["callable"] = bool(data["callable"])
+    project["updated"] = time.time()
+    _save_projects(projects_list)
+    return jsonify(agent)
+
+
+@app.route("/api/projects/<project_id>/agents/<agent_id>", methods=["DELETE"])
+def delete_project_agent(project_id, agent_id):
+    project = _get_project(project_id)
+    if not project:
+        return jsonify({"error": "项目不存在"}), 404
+    agents = project.get("agents") or []
+    new_agents = [a for a in agents if a.get("id") != agent_id]
+    if len(new_agents) == len(agents):
+        return jsonify({"error": "智能体不存在"}), 404
+    if not new_agents:
+        return jsonify({"error": "项目至少保留一个智能体"}), 400
+    project["agents"] = new_agents
+    project["updated"] = time.time()
     _save_projects(projects_list)
     return jsonify({"status": "ok"})
 
@@ -1533,9 +1788,11 @@ def update_conversation_agent(cid):
         return jsonify({"error": "对话不存在"}), 404
     data = request.get_json()
     new_agent_id = data.get("agent_id", None)
+    if not _agent_belongs_to_scope(new_agent_id, conv.get("project_id")):
+        return jsonify({"error": "该智能体不属于当前对话所在的项目"}), 400
     conv["agent_id"] = new_agent_id
     conv["history"] = [m for m in conv["history"] if m["role"] != "system"]
-    system_content = _get_system_content(new_agent_id)
+    system_content = _get_system_content(new_agent_id, conv.get("project_id"))
     if system_content:
         conv["history"].insert(0, {"role": "system", "content": system_content})
     _save_conversations()
@@ -1834,7 +2091,7 @@ def chat():
                     ch = json.dumps({"chunk": text_content}, ensure_ascii=False)
                     yield f"data: {ch}\n\n"
                     now_ts = int(time.time())
-                    history.append({"role": "assistant", "content": text_content, "ts": now_ts})
+                    history.append({"role": "assistant", "content": text_content, "ts": now_ts, "agent_id": agent_id})
                     conv["updated"] = time.time()
                     stream_state["saved"] = True
                     mgr._trim_history()
@@ -1853,7 +2110,7 @@ def chat():
                 for u in img_urls:
                     assistant_content.append({"type": "image_url", "image_url": {"url": u}})
                 now_ts = int(time.time())
-                history.append({"role": "assistant", "content": assistant_content, "ts": now_ts})
+                history.append({"role": "assistant", "content": assistant_content, "ts": now_ts, "agent_id": agent_id})
                 conv["updated"] = time.time()
                 stream_state["saved"] = True
                 mgr._trim_history()
@@ -1930,11 +2187,12 @@ def chat():
 
             full_reply = stream_state["full_reply"]
             if callable_agents and re.search(r"\[CALL:\S+?\]", full_reply):
+                clean_text = re.sub(r"\[CALL:\S+?\][\s\S]*?\[\/CALL\]", "", full_reply).strip()
                 yield "data: \n\n"
-                final_reply = _execute_agent_calls(full_reply)
-                replace_data = json.dumps({"replace": final_reply}, ensure_ascii=False)
+                replace_data = json.dumps({"replace": clean_text}, ensure_ascii=False)
                 yield f"data: {replace_data}\n\n"
-                history[-1]["content"] = final_reply
+                history[-1]["content"] = clean_text
+                yield from _execute_agent_calls_stream(full_reply, history, conv)
                 mgr._trim_history()
             else:
                 mgr._trim_history()
@@ -1963,6 +2221,7 @@ def chat():
             conv["updated"] = time.time()
             if history and history[-1].get("role") == "assistant":
                 history[-1]["ts"] = int(time.time())
+                history[-1]["agent_id"] = agent_id
                 if turn_usage:
                     history[-1]["usage"] = turn_usage
             if turn_usage:
