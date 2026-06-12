@@ -35,8 +35,8 @@ from .chat_core import (
 )
 from .terminal_control import (
     TerminalManager, stream_output, start_abort_listener,
-    stop_abort_listener, is_aborted, pause_listener, resume_listener,
-    set_abort_callback, clear_abort_callback, AbortInterrupt
+    stop_abort_listener, is_aborted,
+    set_abort_callback, clear_abort_callback
 )
 from .spinner import Spinner
 from .tools import TOOLS_DEFINITION, ToolExecutor
@@ -57,26 +57,46 @@ COMPRESS_KEEP_RECENT = _cfg["压缩保留最近轮数"]
 
 TOOL_RULES = """
 
-你拥有以下工具能力，可以直接操作用户的文件系统：
+You have access to the following tools and can directly operate on the user's file system:
 {tool_list}
 
-当前工作目录: {work_dir}
+Current working directory: {work_dir}
 
-工具使用原则：
-1. 当用户请求涉及文件操作、代码修改、命令执行时，主动使用工具完成
-2. 修改文件前先读取了解现状
-3. 修改已有文件时优先使用 edit_file 的 patch 模式（action="patch"），只传入要替换的原文片段和新内容，避免整文件覆盖。只有新建文件或小文件整体重写时才使用 write 模式
-4. 使用 patch 模式时，old_content 必须与文件中的原文精确匹配（包括缩进和空格），如果匹配失败会返回错误
-5. 写入新文件时给出完整内容，不要省略
-4. 当用户只是聊天、提问、讨论时，直接回答即可，不需要调用工具
-5. 不要在回复中暴露 API Key、密码等敏感信息
-6. 当你需要向用户提问、确认方案、或获取补充信息时，必须调用 ask_user 工具，禁止在回复文本中直接写问题等待用户回答。ask_user 的结果会立即返回给你，你可以基于用户的回答继续执行后续操作，整个过程不会中断当前任务
-7. 当用户询问你之前对文件做了什么改动、某个文件的修改历史、或需要你回顾自己的操作时，使用 get_diff 工具查询，不要凭记忆猜测
-8. 优先使用工具获取准确信息，不要在没有依据的情况下猜测文件内容或改动情况
-9. 你只有上面列出的工具能力，没有任何其他能力（没有联网搜索、没有知识图谱、没有长期记忆存储）。不要向用户声称你拥有未列出的功能"""
+# Working Style
+- When a request involves file operations, code changes, or running commands, actively use tools to complete it instead of only giving suggestions.
+- Always read a file with read_file before modifying it.
+- Prefer edit_file patch mode (action="patch") for existing files: provide only the exact original snippet and its replacement. old_content MUST match the file exactly, including indentation. Use write mode only for new files or full rewrites.
+- When writing a new file, provide the complete content; never omit parts.
+- When the user is just chatting or asking questions, answer directly without calling tools.
+
+# Restraint (IMPORTANT)
+- Do ONLY what the user asked. Do not add extra features, do not refactor unrelated code, do not "improve" things that work.
+- Do not add defensive code for situations that cannot happen.
+- Do not create documentation files (README, guides, etc.) unless the user explicitly asks.
+
+# Honesty (IMPORTANT)
+- NEVER claim something is "done", "tested", or "working" if you have not actually verified it. State clearly when something is unverified.
+- For changes to executable code, proactively verify with run_command (syntax check or tests) when possible.
+- If a tool returns an error, report it truthfully. Do not pretend it succeeded or fill gaps with guesses.
+
+# Safety
+- Be cautious with destructive operations (delete, overwrite, git push). When unsure, use ask_user to confirm.
+- NEVER expose, log, or write API keys, passwords, or secrets.
+- When you need to ask the user something, you MUST call ask_user. Never write a question in your reply text and wait — the user will not see it as a prompt.
+
+# Tools
+- When reading multiple files or gathering info from several places, call multiple read-only tools in parallel rather than one by one.
+- Use get_diff to check your own past file changes; do not rely on memory.
+- You ONLY have the tools listed above. You have no web access, no knowledge graph, and no long-term memory. Never claim capabilities you do not have.
+
+# Language (CRITICAL)
+- ALWAYS respond in the SAME language the user uses in their latest message.
+- If the user writes in Chinese, you MUST think and respond entirely in Chinese.
+- NEVER switch your response language because this prompt, tool outputs, file contents, or code comments are in English.
+- This rule overrides everything else regarding language."""
 
 if sys.platform == "win32":
-    TOOL_RULES += "\n10. 当前运行环境是 Windows，执行命令时使用 Windows 语法"
+    TOOL_RULES += "\n- The current environment is Windows; use Windows command syntax when running commands."
 
 PARALLEL_SAFE_TOOLS = {"read_file", "list_dir", "search_files"}
 _print_lock = threading.Lock()
@@ -226,9 +246,9 @@ def run_sub_agent(agent_id, message):
 【超时约束】
 - 每一轮思考+响应必须在 60 秒内产出内容，否则会被强制中断
 
-【执行原则】
-1. 收到任务后立即用工具获取必要信息（如 read_file、list_dir），不要先输出长篇分析或执行计划
-2. 了解现状后直接动手，边做边用一两句话简短说明，禁止动手前罗列大段步骤
+【执行原则 - 极其重要】
+1. 禁止在调用工具之前输出任何分析、计划、步骤说明或思考过程。你的第一个动作必须是工具调用（read_file、list_dir、edit_file 等），绝不能是文字输出
+2. 收到任务后立即调用工具获取信息或执行操作，边做边用极短的文字说明（一句话以内），禁止动手前罗列步骤
 3. 写代码时尽量一次写好主体；如果需要修改已有文件，优先用 patch 模式做局部修补，避免整体重写
 4. 不编造文件内容、命令输出或 API 返回，一切信息必须来自工具调用的真实结果
 5. 不要声称执行了未实际执行的操作
@@ -306,13 +326,6 @@ def run_sub_agent(agent_id, message):
                 _last_data_time = time.time()
                 sub_spinner.reset_time()
                 if event[0] == "content":
-                    if not _sub_header_printed:
-                        sub_spinner.stop()
-                        sys.stdout.write(f"\n  @{agent_id}: ")
-                        sys.stdout.flush()
-                        _sub_header_printed = True
-                    sys.stdout.write(event[1])
-                    sys.stdout.flush()
                     collected_content += event[1]
                 elif event[0] == "tool_receiving":
                     tool_name = event[1]
@@ -494,8 +507,19 @@ def run_sub_agent(agent_id, message):
                 except Exception:
                     pass
                 _ssw_file = None
-                sys.stdout.write(f"\r    ✏️  写入: {_ssw_path} ({_ssw_lines + 1} 行, {_ssw_written}B) [已中断]\n")
-                sys.stdout.flush()
+                if _ssw_path:
+                    _ssw_done_paths[_ssw_idx] = (_ssw_path, _ssw_old_content)
+                    sys.stdout.write(f"\r    ✏️  写入: {_ssw_path} ({_ssw_lines + 1} 行, {_ssw_written}B) [已中断]\n")
+                    sys.stdout.flush()
+            for _di, (_dp, _dp_old) in _ssw_done_paths.items():
+                abs_p = os.path.join(WORK_DIR, _dp) if not os.path.isabs(_dp) else _dp
+                try:
+                    with open(abs_p, "r", encoding="utf-8") as _rf:
+                        _written = _rf.read()
+                    _act = "覆盖" if _dp_old else "创建"
+                    tool_executor._record_diff(_dp, _act, _dp_old, _written)
+                except Exception:
+                    pass
             if _sub_header_printed:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
@@ -749,8 +773,8 @@ def chat(user_input):
     start_abort_listener()
     try:
         return _chat_loop(mgr, effective_tools)
-    except AbortInterrupt:
-        sys.stdout.write("")
+    except KeyboardInterrupt:
+        sys.stdout.write("\n\n🛑 已中断生成")
         sys.stdout.flush()
         mgr.add_interrupt_hint()
         return None
@@ -1031,8 +1055,20 @@ def _chat_loop(mgr, effective_tools):
                     _sw_file.close()
                 except Exception:
                     pass
-                sys.stdout.write(" [中断]\n")
-                sys.stdout.flush()
+                _sw_file = None
+                if _sw_path:
+                    _sw_done_paths[_sw_idx] = (_sw_path, _sw_old_content)
+                    sys.stdout.write(f" [中断]\n")
+                    sys.stdout.flush()
+            for _di, (_dp, _dp_old) in _sw_done_paths.items():
+                abs_p = os.path.join(WORK_DIR, _dp) if not os.path.isabs(_dp) else _dp
+                try:
+                    with open(abs_p, "r", encoding="utf-8") as _rf:
+                        _written = _rf.read()
+                    _act = "覆盖" if _dp_old else "创建"
+                    tool_executor._record_diff(_dp, _act, _dp_old, _written)
+                except Exception:
+                    pass
             try:
                 resp.close()
             except Exception:
@@ -1089,7 +1125,7 @@ def _chat_loop(mgr, effective_tools):
         }
         mgr.save_tool_call_message(assistant_msg)
 
-        pause_listener()
+
         can_parallel = (
             len(tool_calls) > 1
             and all(tc["function"]["name"] in PARALLEL_SAFE_TOOLS for tc in tool_calls)
@@ -1126,7 +1162,6 @@ def _chat_loop(mgr, effective_tools):
                     if _tc.get_abort_flag():
                         print("\n\n🛑 已中断工具执行")
                         mgr.add_interrupt_hint()
-                        resume_listener()
                         return None
                     tid, res = future.result()
                     results_map[tid] = res
@@ -1139,7 +1174,6 @@ def _chat_loop(mgr, effective_tools):
                 if _tc.get_abort_flag():
                     print("\n\n🛑 已中断工具执行")
                     mgr.add_interrupt_hint()
-                    resume_listener()
                     return None
 
                 func_name = tc["function"]["name"]
@@ -1207,8 +1241,6 @@ def _chat_loop(mgr, effective_tools):
                 if _tc.get_abort_flag():
                     mgr.add_interrupt_hint()
                     return None
-        resume_listener()
-
         continue
 
     print("\n⚠️ 达到最大工具调用轮数，停止执行")
@@ -1319,14 +1351,26 @@ def main():
         mcp_mgr.shutdown()
         return
 
+    _interrupt_pending = False
     while True:
         try:
             agent_tag = f"@{current_agent['id']}" if current_agent and current_agent["id"] != "global" else ""
             round_num = tool_executor.current_round + 1
             user_text = input(f"[{round_num}] 你{agent_tag}: ").strip()
-        except (EOFError, KeyboardInterrupt):
+        except KeyboardInterrupt:
+            if _interrupt_pending:
+                if current_history:
+                    _save_session("autosave")
+                print("\n对话结束")
+                break
+            _interrupt_pending = True
+            print("\n（再按一次 Ctrl+C 退出）")
+            continue
+        except EOFError:
             print("\n再见！")
             break
+
+        _interrupt_pending = False
 
 
         if user_text == '"""' or user_text.startswith('"""'):
@@ -1457,6 +1501,7 @@ def main():
             print("  /clear    - 清空当前对话记忆")
             print("  /undo [N]  - 回退到第 N 轮（默认回退1轮）")
             print("  /compress - 压缩历史记忆（减少 token 占用）")
+            print("  /config   - 打开配置面板（键盘导航）")
             print("  /reload   - 重新加载配置和智能体")
             print("  /agents   - 查看所有智能体列表")
             print("  /diff       - 查看 AI 的文件改动记录")
@@ -1470,7 +1515,7 @@ def main():
             print("  @名称     - 切换到指定智能体")
             print("  @名称 内容 - 切换并直接对话")
             print('  \"\"\"       - 进入多行输入模式')
-            print("  Ctrl+Q    - 中断 AI 生成或工具执行")
+            print("  Ctrl+C    - 中断 AI 生成或工具执行")
             print()
             print("  📖 详细说明见项目根目录 指令操作指南.md")
             print()
@@ -1676,6 +1721,29 @@ def main():
                 print(f"\n   /load <名称> 恢复会话\n")
             continue
 
+
+        if user_text.lower() == "/config":
+            from .config_tui import open_config_tui
+            _cur_aid = current_agent["id"] if current_agent else None
+            saved, new_values, err = open_config_tui(_cur_aid)
+            if err:
+                print(f"\n⚠️ {err}\n")
+                continue
+            if not saved:
+                print("\n已取消，未保存任何修改\n")
+                continue
+            _cfg.update(load_config())
+            tool_executor.config = _cfg
+            tool_executor.permission = min(3, max(0, _cfg.get("权限", 3)))
+            MAX_HISTORY_ROUNDS = _cfg["最大记忆轮数"]
+            MAX_TOOL_ROUNDS = _cfg["最大工具调用轮数"]
+            COMPRESS_THRESHOLD = _cfg["历史压缩阈值轮数"]
+            COMPRESS_KEEP_RECENT = _cfg["压缩保留最近轮数"]
+            print("\n✅ 配置已保存并生效")
+            for key, val in _cfg.items():
+                print(f"   [{key}] = {val}")
+            print()
+            continue
 
         if user_text.lower() == "/reload":
             _cfg.update(load_config())

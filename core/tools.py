@@ -228,8 +228,13 @@ class ToolExecutor:
 
     def _resolve_path(self, path):
         if os.path.isabs(path):
-            return path
-        return os.path.join(self.work_dir, path)
+            resolved = os.path.normpath(path)
+        else:
+            resolved = os.path.normpath(os.path.join(self.work_dir, path))
+        work_prefix = os.path.normpath(self.work_dir) + os.sep
+        if not (resolved == os.path.normpath(self.work_dir) or resolved.startswith(work_prefix)):
+            return None
+        return resolved
 
     def _confirm(self, action_desc):
         if self.permission >= 3 or self.auto_confirm:
@@ -344,6 +349,8 @@ class ToolExecutor:
 
     def _read_file(self, args):
         path = self._resolve_path(args["path"])
+        if path is None:
+            return "[拒绝] 路径超出工作目录范围"
         offset = args.get("offset", 1)
         limit = args.get("limit", self.config.get("单次读取文件最大行数", 200))
         if not os.path.exists(path):
@@ -371,6 +378,8 @@ class ToolExecutor:
         if "path" not in args:
             return "[错误] edit_file 缺少必需参数 'path'"
         path = self._resolve_path(args["path"])
+        if path is None:
+            return "[拒绝] 路径超出工作目录范围"
 
         if action == "delete":
             return self._do_delete(path, args["path"])
@@ -586,6 +595,8 @@ class ToolExecutor:
                     file_map[p] = r
             for p, r in file_map.items():
                 full_path = self._resolve_path(p)
+                if full_path is None:
+                    continue
                 try:
                     if r['old'] == '':
                         if os.path.isfile(full_path):
@@ -628,9 +639,10 @@ class ToolExecutor:
         command = args["command"]
         timeout = args.get("timeout", self.config.get("命令执行超时秒数", 30))
 
-        for dangerous in DANGEROUS_COMMANDS:
-            if dangerous in command:
-                return f"[拒绝] 危险命令被阻止: {command}"
+        if self.permission < 3:
+            for dangerous in DANGEROUS_COMMANDS:
+                if dangerous in command:
+                    return f"[拒绝] 危险命令被阻止: {command}"
 
         if not self._confirm(f"执行命令: {command}"):
             return "[已取消] 用户拒绝了命令执行"
@@ -717,6 +729,8 @@ class ToolExecutor:
 
     def _list_dir(self, args):
         path = self._resolve_path(args.get("path", "."))
+        if path is None:
+            return "[拒绝] 路径超出工作目录范围"
         recursive = args.get("recursive", False)
         include_hidden = args.get("include_hidden", False)
         if not os.path.exists(path):
@@ -756,6 +770,8 @@ class ToolExecutor:
     def _search_files(self, args):
         pattern = args["pattern"]
         search_path = self._resolve_path(args.get("path", "."))
+        if search_path is None:
+            return "[拒绝] 路径超出工作目录范围"
         file_pattern = args.get("file_pattern", "*")
         include_hidden = args.get("include_hidden", False)
 
