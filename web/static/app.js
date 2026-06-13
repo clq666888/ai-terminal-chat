@@ -47,6 +47,7 @@ const setCompressThreshold = document.getElementById("set-compress-threshold");
 const compressThresholdRow = document.getElementById("compress-threshold-row");
 const setBaseUrl = document.getElementById("set-base-url");
 const setApiKey = document.getElementById("set-api-key");
+const modelDisplayName = document.getElementById("model-display-name");
 const keyStatus = document.getElementById("key-status");
 const quickModel = document.getElementById("quick-model");
 
@@ -98,11 +99,46 @@ const agentCallable = document.getElementById("agent-callable");
 const callableFields = document.getElementById("callable-fields");
 const agentSlug = document.getElementById("agent-slug");
 const agentWhenToCall = document.getElementById("agent-when-to-call");
+const agentCancallList = document.getElementById("agent-cancall-list");
 
 const btnAttach = document.getElementById("btn-attach");
 const btnWebsearch = document.getElementById("btn-websearch");
 const imageFileInput = document.getElementById("image-file-input");
 const imagePreviewBar = document.getElementById("image-preview-bar");
+
+const btnModeToggle = document.getElementById("mode-toggle");
+const modeToggleLabel = document.getElementById("mode-toggle-label");
+
+const MODE_LABELS = { chat: "对话", blackbox: "黑盒", workflow: "工作流" };
+
+function updateModeToggleUI() {
+    if (!btnModeToggle) return;
+    const m = currentOrchestrationMode || "chat";
+    btnModeToggle.classList.toggle("blackbox", m === "blackbox");
+    btnModeToggle.classList.toggle("workflow", m === "workflow");
+    btnModeToggle.classList.toggle("chat", m === "chat");
+    if (modeToggleLabel) modeToggleLabel.textContent = MODE_LABELS[m] || "对话";
+}
+
+function pickConversationMode() {
+    return new Promise((resolve) => {
+        const overlay = document.getElementById("mode-pick-overlay");
+        if (!overlay) { resolve("chat"); return; }
+        const items = overlay.querySelectorAll(".mode-pick-item");
+        const cancelBtn = document.getElementById("mode-pick-cancel");
+        const close = (val) => {
+            overlay.classList.remove("active");
+            items.forEach(it => it.onclick = null);
+            if (cancelBtn) cancelBtn.onclick = null;
+            overlay.onclick = null;
+            resolve(val);
+        };
+        items.forEach(it => { it.onclick = () => close(it.dataset.mode); });
+        if (cancelBtn) cancelBtn.onclick = () => close(null);
+        overlay.onclick = (e) => { if (e.target === overlay) close(null); };
+        overlay.classList.add("active");
+    });
+}
 
 let webSearchOn = false;
 if (btnWebsearch) {
@@ -121,6 +157,64 @@ let welcomeHTML = welcome ? welcome.outerHTML : "";
 let providers = {};
 let currentAgentId = null;
 let currentProjectId = null;
+let currentOrchestrationMode = "chat";
+let _activeAgentCollapse = null;
+let _activeHostMessage = null;
+
+function _isBlackbox() { return currentOrchestrationMode === "blackbox"; }
+
+function _setHostMessage(msgEl) {
+    _activeHostMessage = msgEl || null;
+}
+
+function _resolveHostMessage() {
+    if (_activeHostMessage && _activeHostMessage.isConnected) return _activeHostMessage;
+    const aiMsgs = Array.prototype.filter.call(
+        chatArea.children,
+        el => el.classList && el.classList.contains("message") && el.classList.contains("ai") && !el.classList.contains("agent-call")
+    );
+    _activeHostMessage = aiMsgs.length ? aiMsgs[aiMsgs.length - 1] : null;
+    return _activeHostMessage;
+}
+
+function _ensureAgentCollapse() {
+    if (_activeAgentCollapse && _activeAgentCollapse.isConnected) return _activeAgentCollapse;
+    hideWelcome();
+    const det = document.createElement("details");
+    det.className = "agent-collapse";
+    const sum = document.createElement("summary");
+    sum.className = "agent-collapse-summary";
+    sum.innerHTML = '<svg class="ac-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="9 18 15 12 9 6"></polyline></svg><span class="ac-text">子智能体协作过程</span><span class="ac-count">0</span>';
+    det.appendChild(sum);
+    const body = document.createElement("div");
+    body.className = "agent-collapse-body";
+    det.appendChild(body);
+    const host = _resolveHostMessage();
+    if (host) {
+        host.appendChild(det);
+        host.classList.add("has-collapse");
+    } else {
+        chatArea.appendChild(det);
+    }
+    _activeAgentCollapse = det;
+    return det;
+}
+
+function _collapseBody() {
+    const det = _ensureAgentCollapse();
+    return det.querySelector(".agent-collapse-body");
+}
+
+function _bumpCollapseCount() {
+    if (!_activeAgentCollapse) return;
+    const body = _activeAgentCollapse.querySelector(".agent-collapse-body");
+    const cnt = _activeAgentCollapse.querySelector(".ac-count");
+    if (body && cnt) cnt.textContent = String(body.querySelectorAll(".message.agent-call").length);
+}
+
+function _closeAgentCollapse() {
+    _activeAgentCollapse = null;
+}
 let editingAgentId = null;
 let agentAvatarUrl = "";
 let cachedAgents = [];
@@ -648,12 +742,16 @@ async function showAgentList() {
     cachedAgents = resp.ok ? await resp.json() : [];
     agentGrid.innerHTML = "";
 
-    if (cachedAgents.length === 0) {
+    // 项目场景下，默认助手（第0个/通用助手）跟随全局模型，对齐全局场景：
+    // 不在管理界面显示其卡片，避免被误删；它仍会出现在智能体选择下拉里。
+    const manageAgents = isProjectAgentContext() ? cachedAgents.slice(1) : cachedAgents;
+
+    if (manageAgents.length === 0) {
         agentGrid.innerHTML = '<div class="empty-hint">还没有创建智能体，点击下方按钮创建</div>';
         return;
     }
 
-    cachedAgents.forEach(a => {
+    manageAgents.forEach(a => {
         const card = document.createElement("div");
         card.className = "agent-card";
         const avatarHTML = a.avatar
@@ -747,9 +845,41 @@ async function showAgentForm(agent) {
     callableFields.style.display = agentCallable.checked ? "block" : "none";
     agentSlug.value = agent ? (agent.slug || "") : "";
     agentWhenToCall.value = agent ? (agent.when_to_call || "") : "";
+    renderCancallList(agent);
 
     agentCustomToggle.onchange = applyAgentModelMode;
     agentProvider.onchange = onAgentProviderChange;
+}
+
+function renderCancallList(agent) {
+    if (!agentCancallList) return;
+    agentCancallList.innerHTML = "";
+    const editingId = agent ? agent.id : null;
+    const selected = new Set((agent && Array.isArray(agent.can_call)) ? agent.can_call : []);
+    const candidates = (cachedAgents || []).filter(a => a.callable && a.slug && a.id !== editingId);
+    if (candidates.length === 0) {
+        agentCancallList.innerHTML = '<div class="input-hint">同范围内暂无可被调用的智能体</div>';
+        return;
+    }
+    candidates.forEach(a => {
+        const row = document.createElement("label");
+        row.className = "cancall-item";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = a.id;
+        cb.checked = selected.has(a.id);
+        const txt = document.createElement("span");
+        txt.className = "cancall-item-name";
+        txt.textContent = a.name + "（" + a.slug + "）";
+        row.appendChild(cb);
+        row.appendChild(txt);
+        agentCancallList.appendChild(row);
+    });
+}
+
+function collectCancall() {
+    if (!agentCancallList) return [];
+    return Array.from(agentCancallList.querySelectorAll("input[type=checkbox]:checked")).map(cb => cb.value);
 }
 
 async function buildAgentSavedModelList(agent) {
@@ -760,17 +890,17 @@ async function buildAgentSavedModelList(agent) {
     } catch (e) {}
     agentSavedModel.innerHTML = '<option value="">跟随当前模型</option>';
     customModels.forEach(m => {
-        const key = m.provider + "|" + m.model;
         const opt = document.createElement("option");
-        opt.value = key;
+        opt.value = m.id;
         opt.dataset.baseUrl = m.base_url || "";
+        opt.dataset.provider = m.provider || "";
+        opt.dataset.model = m.model || "";
         opt.textContent = m.name || m.model;
         agentSavedModel.appendChild(opt);
     });
-    if (agent && agent.model) {
-        const wantKey = (agent.provider || "") + "|" + agent.model;
-        const match = Array.from(agentSavedModel.options).find(o => o.value === wantKey);
-        agentSavedModel.value = match ? wantKey : "";
+    if (agent && agent.model_id) {
+        const match = Array.from(agentSavedModel.options).find(o => o.value === agent.model_id);
+        agentSavedModel.value = match ? agent.model_id : "";
     } else {
         agentSavedModel.value = "";
     }
@@ -829,10 +959,12 @@ async function saveAgent() {
         system_prompt: agentPrompt.value,
         provider: "",
         model: "",
+        model_id: "",
         base_url: "",
         callable: callable,
         slug: slug,
-        when_to_call: whenToCall
+        when_to_call: whenToCall,
+        can_call: collectCancall()
     };
 
     if (agentCustomToggle.checked) {
@@ -852,18 +984,13 @@ async function saveAgent() {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(regBody)
             });
-            if (!regResp.ok && regResp.status !== 409) {
+            if (!regResp.ok) {
                 const err = await regResp.json();
                 showToast(err.error || "保存模型失败", "error");
                 return;
             }
-            if (cKey && regResp.status === 409) {
-                await fetch("/api/settings", {
-                    method: "PUT",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ provider: cProvider, api_key: cKey })
-                });
-            }
+            const regData = await regResp.json();
+            payload.model_id = regData.id || "";
         } catch (e) {
             showToast("保存模型失败: " + e.message, "error");
             return;
@@ -875,10 +1002,10 @@ async function saveAgent() {
     } else {
         const val = agentSavedModel.value;
         if (val) {
-            const [sProvider, sModel] = val.split("|", 2);
             const selOpt = agentSavedModel.selectedOptions[0];
-            payload.provider = sProvider;
-            payload.model = sModel;
+            payload.model_id = val;
+            payload.provider = selOpt && selOpt.dataset.provider ? selOpt.dataset.provider : "";
+            payload.model = selOpt && selOpt.dataset.model ? selOpt.dataset.model : "";
             payload.base_url = selOpt && selOpt.dataset.baseUrl ? selOpt.dataset.baseUrl : "";
         }
     }
@@ -923,7 +1050,7 @@ async function buildQuickModelList() {
     const customModels = customResp.ok ? await customResp.json() : [];
 
     quickModel.innerHTML = "";
-    const activeKey = active.provider + "|" + active.model;
+    const activeKey = active.id || "";
 
     if (customModels.length === 0) {
         const placeholder = document.createElement("option");
@@ -936,10 +1063,12 @@ async function buildQuickModelList() {
     }
 
     customModels.forEach(m => {
-        const key = m.provider + "|" + m.model;
+        const key = m.id;
         const opt = document.createElement("option");
         opt.value = key;
         opt.dataset.baseUrl = m.base_url || "";
+        opt.dataset.provider = m.provider || "";
+        opt.dataset.model = m.model || "";
         opt.textContent = m.name || m.model;
         if (key === activeKey) opt.selected = true;
         quickModel.appendChild(opt);
@@ -952,18 +1081,16 @@ async function onQuickModelChange() {
     if (quickModel.disabled) return;
     const val = quickModel.value;
     if (!val) return;
-    const [provider, model] = val.split("|", 2);
     const selected = quickModel.selectedOptions[0];
-    const baseUrl = selected && selected.dataset.baseUrl ? selected.dataset.baseUrl : "";
+    const model = selected && selected.dataset.model ? selected.dataset.model : "";
     try {
-        const body = { provider, model };
-        if (baseUrl) body.base_url = baseUrl;
+        const body = { id: val };
         const resp = await fetch("/api/model", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body)
         });
-        if (resp.ok) showToast("已切换到 " + model, "success");
+        if (resp.ok) showToast("已切换到 " + (model || (selected ? selected.textContent : "")), "success");
     } catch (err) {
         showToast("切换失败", "error");
     }
@@ -971,26 +1098,28 @@ async function onQuickModelChange() {
 
 async function syncQuickModelToAgent() {
     const agent = currentAgentId ? cachedAgents.find(a => a.id === currentAgentId) : null;
-    const locked = !!(agent && agent.model);
+    const locked = !!(agent && (agent.model_id || agent.model));
 
     if (locked) {
-        const wantKey = (agent.provider || "") + "|" + agent.model;
-        let opt = Array.from(quickModel.options).find(o => o.value === wantKey);
+        const wantId = agent.model_id || "";
+        let opt = wantId ? Array.from(quickModel.options).find(o => o.value === wantId) : null;
         if (!opt) {
             opt = document.createElement("option");
-            opt.value = wantKey;
+            opt.value = wantId || ("__agent__" + agent.id);
             opt.dataset.baseUrl = agent.base_url || "";
+            opt.dataset.provider = agent.provider || "";
+            opt.dataset.model = agent.model || "";
             opt.dataset.agentTemp = "1";
-            opt.textContent = agent.model;
+            opt.textContent = agent.model || agent.name;
             quickModel.appendChild(opt);
         }
-        quickModel.value = wantKey;
+        quickModel.value = opt.value;
         quickModel.disabled = true;
         quickModel.title = "当前模型已由智能体「" + agent.name + "」指定，不可修改";
         try {
-            const body = { provider: agent.provider || "", model: agent.model };
-            const baseUrl = opt.dataset.baseUrl || agent.base_url || "";
-            if (baseUrl) body.base_url = baseUrl;
+            const body = wantId
+                ? { id: wantId }
+                : { provider: agent.provider || "", model: agent.model, base_url: agent.base_url || "" };
             await fetch("/api/model", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
@@ -1108,6 +1237,8 @@ async function openManageModels() {
     btnSaveApiConfig.dataset.editingKey = "";
     btnSaveApiConfig.textContent = "保存配置";
     modelConfigTitle.textContent = "新增模型";
+    if (modelDisplayName) modelDisplayName.value = "";
+    if (setApiKey) setApiKey.value = "";
     await onAddProviderChange();
     modelManageOverlay.classList.add("active");
 }
@@ -1157,15 +1288,8 @@ async function onAddProviderChange() {
     }
     addModelCustom.value = "";
     setApiKey.value = "";
-    try {
-        const r = await fetch("/api/provider-key-status?provider=" + encodeURIComponent(key));
-        const d = r.ok ? await r.json() : { has_api_key: false };
-        keyStatus.textContent = d.has_api_key ? "\u2713 \u5df2\u914d\u7f6e API Key\uff08\u53ef\u4e0d\u586b\uff0c\u7559\u7a7a\u5219\u6cbf\u7528\uff09" : "\u2717 \u672a\u914d\u7f6e API Key";
-        keyStatus.className = "key-status " + (d.has_api_key ? "ok" : "no");
-    } catch (e) {
-        keyStatus.textContent = "\u2717 \u672a\u914d\u7f6e API Key";
-        keyStatus.className = "key-status no";
-    }
+    keyStatus.textContent = "\u2717 \u672a\u914d\u7f6e API Key";
+    keyStatus.className = "key-status no";
 }
 
 let customModelsCache = [];
@@ -1183,7 +1307,7 @@ async function renderCustomModelList() {
         return;
     }
     customModels.forEach((m, idx) => {
-        const isActive = m.provider === active.provider && m.model === active.model;
+        const isActive = m.id === active.id;
         const item = document.createElement("div");
         item.className = "custom-model-item" + (isActive ? " is-active" : "");
         const fullSub = m.name ? (m.name + ' / ' + m.model) : m.model;
@@ -1223,9 +1347,16 @@ async function renderCustomModelList() {
                 const ep = providers[m.provider];
                 addModel.style.display = (ep && ep.models && ep.models.length > 0) ? "" : "none";
             }
-            btnSaveApiConfig.dataset.editingKey = m.provider + "|" + m.model;
+            btnSaveApiConfig.dataset.editingKey = m.id;
+            if (modelDisplayName) modelDisplayName.value = m.name || "";
             btnSaveApiConfig.textContent = "保存修改";
             modelConfigTitle.textContent = "编辑模型";
+            try {
+                const kr = await fetch("/api/provider-key-status?id=" + encodeURIComponent(m.id));
+                const kd = kr.ok ? await kr.json() : { has_api_key: false };
+                keyStatus.textContent = kd.has_api_key ? "\u2713 \u5df2\u914d\u7f6e API Key\uff08\u53ef\u4e0d\u586b\uff0c\u7559\u7a7a\u5219\u6cbf\u7528\uff09" : "\u2717 \u672a\u914d\u7f6e API Key";
+                keyStatus.className = "key-status " + (kd.has_api_key ? "ok" : "no");
+            } catch (e) {}
         });
         item.querySelector(".btn-remove-model").addEventListener("click", async () => {
             const ok = await confirmDialog("确定要删除模型「" + (m.name || m.model) + "」吗？此操作不可恢复。", { title: "删除模型", icon: "\u{1F5D1}\uFE0F", okText: "删除" });
@@ -1233,9 +1364,9 @@ async function renderCustomModelList() {
             await fetch("/api/custom-models", {
                 method: "DELETE",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ provider: m.provider, model: m.model })
+                body: JSON.stringify({ id: m.id })
             });
-            if (btnSaveApiConfig.dataset.editingKey === m.provider + "|" + m.model) {
+            if (btnSaveApiConfig.dataset.editingKey === m.id) {
                 btnSaveApiConfig.dataset.editingKey = "";
                 btnSaveApiConfig.textContent = "保存配置";
             }
@@ -1253,7 +1384,7 @@ async function moveCustomModel(index, delta) {
     const tmp = list[index];
     list[index] = list[target];
     list[target] = tmp;
-    const order = list.map(m => m.provider + "|" + m.model);
+    const order = list.map(m => m.id);
     try {
         await fetch("/api/custom-models/reorder", {
             method: "POST",
@@ -1272,37 +1403,29 @@ async function saveApiConfig() {
     const base_url = setBaseUrl.value.trim();
     if (!base_url) { showToast("请填写 API 地址", "error"); return; }
     if (!model) { showToast("请选择或输入模型名称", "error"); return; }
-    const payload = { provider, base_url, model };
     const apiKeyVal = setApiKey.value.trim();
-    if (apiKeyVal) payload.api_key = apiKeyVal;
     try {
-        const settingsResp = await fetch("/api/settings", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-        if (!settingsResp.ok) {
-            const err = await settingsResp.json();
-            showToast(err.error || "保存失败", "error");
-            return;
-        }
         const p = providers[provider];
-        const name = (p ? p.name : provider) + " / " + model;
+        const customName = modelDisplayName ? modelDisplayName.value.trim() : "";
+        const name = customName || ((p ? p.name : provider) + " / " + model);
         const editingKey = btnSaveApiConfig.dataset.editingKey || "";
         if (editingKey) {
-            const [oldProvider, oldModel] = editingKey.split("|", 2);
+            const putBody = { id: editingKey, provider, model, base_url, name };
+            if (apiKeyVal) putBody.api_key = apiKeyVal;
             await fetch("/api/custom-models", {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ old_provider: oldProvider, old_model: oldModel, provider, model, base_url, name })
+                body: JSON.stringify(putBody)
             });
             btnSaveApiConfig.dataset.editingKey = "";
             btnSaveApiConfig.textContent = "保存配置";
         } else {
+            const postBody = { provider, model, base_url, name };
+            if (apiKeyVal) postBody.api_key = apiKeyVal;
             await fetch("/api/custom-models", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ provider, model, base_url, name })
+                body: JSON.stringify(postBody)
             });
         }
         showToast("配置已保存", "success");
@@ -1570,17 +1693,17 @@ async function buildProjAgentModelList(agent) {
     } catch (e) {}
     projAgentModel.innerHTML = '<option value="">跟随当前模型</option>';
     customModels.forEach(m => {
-        const key = m.provider + "|" + m.model;
         const opt = document.createElement("option");
-        opt.value = key;
+        opt.value = m.id;
         opt.dataset.baseUrl = m.base_url || "";
+        opt.dataset.provider = m.provider || "";
+        opt.dataset.model = m.model || "";
         opt.textContent = m.name || m.model;
         projAgentModel.appendChild(opt);
     });
-    if (agent && agent.model) {
-        const wantKey = (agent.provider || "") + "|" + agent.model;
-        const match = Array.from(projAgentModel.options).find(o => o.value === wantKey);
-        projAgentModel.value = match ? wantKey : "";
+    if (agent && agent.model_id) {
+        const match = Array.from(projAgentModel.options).find(o => o.value === agent.model_id);
+        projAgentModel.value = match ? agent.model_id : "";
     } else {
         projAgentModel.value = "";
     }
@@ -1605,11 +1728,11 @@ async function saveProjAgent() {
     const name = projAgentName.value.trim();
     if (!name) { showToast("请输入智能体名称", "error"); return; }
     const opt = projAgentModel.options[projAgentModel.selectedIndex];
-    let provider = "", model = "", baseUrl = "";
+    let provider = "", model = "", baseUrl = "", modelId = "";
     if (projAgentModel.value) {
-        const parts = projAgentModel.value.split("|");
-        provider = parts[0] || "";
-        model = parts.slice(1).join("|") || "";
+        modelId = projAgentModel.value;
+        provider = opt ? (opt.dataset.provider || "") : "";
+        model = opt ? (opt.dataset.model || "") : "";
         baseUrl = opt ? (opt.dataset.baseUrl || "") : "";
     }
     const payload = {
@@ -1617,6 +1740,7 @@ async function saveProjAgent() {
         system_prompt: projAgentPrompt.value,
         provider: provider,
         model: model,
+        model_id: modelId,
         base_url: baseUrl
     };
 
@@ -2136,7 +2260,12 @@ async function createNewConversation(projectId) {
         btnStop.style.display = "none";
         btnSend.disabled = false;
     }
-    const body = { agent_id: currentAgentId };
+    let pickedMode = "chat";
+    if (!projectId) {
+        pickedMode = await pickConversationMode();
+        if (pickedMode === null) return;
+    }
+    const body = { agent_id: currentAgentId, orchestration_mode: pickedMode };
     if (projectId) body.project_id = projectId;
     const resp = await fetch("/api/conversations", {
         method: "POST",
@@ -2146,6 +2275,9 @@ async function createNewConversation(projectId) {
     const conv = await resp.json();
     currentConvId = conv.id;
     currentProjectId = projectId || null;
+    currentOrchestrationMode = conv.orchestration_mode || "chat";
+    _activeAgentCollapse = null;
+    updateModeToggleUI();
     currentAgentId = (conv.agent_id !== undefined) ? conv.agent_id : currentAgentId;
     cachedAgents = await fetchContextAgents();
     updateSelectorButton();
@@ -2174,9 +2306,17 @@ async function switchConversation(cid) {
     }
     currentConvId = cid;
     isBatchRendering = true;
+    _activeAgentCollapse = null;
     document.querySelectorAll(".conv-item").forEach(el => {
         el.classList.toggle("active", el.dataset.id === cid);
     });
+    try {
+        const _lr = await fetch("/api/conversations");
+        const _ll = await _lr.json();
+        const _cc = _ll.find(c => c.id === cid);
+        currentOrchestrationMode = (_cc && _cc.orchestration_mode) ? _cc.orchestration_mode : "chat";
+    } catch (e) { currentOrchestrationMode = "chat"; }
+    updateModeToggleUI();
     const resp = await fetch("/api/conversations/" + cid + "/messages");
     const msgs = await resp.json();
     fetchConvTokenTotal(cid);
@@ -2220,9 +2360,22 @@ async function switchConversation(cid) {
             let renderedBubble;
             if (m.agent_call) {
                 addAgentCallMessage(m.agent_call.slug || "", m.agent_call.name || "", text);
-                renderedBubble = chatArea.lastElementChild;
+                renderedBubble = _isBlackbox() ? (_activeAgentCollapse ? _activeAgentCollapse.querySelector(".agent-collapse-body").lastElementChild : chatArea.lastElementChild) : chatArea.lastElementChild;
+            } else if (m.reconcile && _isBlackbox() && _resolveHostMessage()) {
+                const host = _resolveHostMessage();
+                const fb = document.createElement("div");
+                fb.className = "bubble reconcile-bubble";
+                const rendered = renderCallBlocks(text);
+                if (rendered) fb.appendChild(rendered);
+                else fb.innerHTML = renderMarkdown(text);
+                host.appendChild(fb);
+                renderedBubble = fb;
             } else {
+                if (_isBlackbox()) _closeAgentCollapse();
                 renderedBubble = addMessage(role, text, imgs, historyDocs, thisUserIndex, role === "ai" ? msgAgentId : null);
+                if (role === "ai" && !m.agent_call) {
+                    _setHostMessage(renderedBubble.closest(".message"));
+                }
             }
             if (role === "ai" && !m.agent_call) {
                 lastAiBubble = renderedBubble;
@@ -2453,6 +2606,25 @@ async function attachToActiveStream(cid) {
                     if (parsed.reasoning_start) isReasoning = true;
                     if (parsed.reasoning) { reasoningText += parsed.reasoning; rerender(); }
                     if (parsed.reasoning_end) { isReasoning = false; rerender(); }
+                    if (parsed.reconcile_start) {
+                        if (cursor.parentNode) cursor.remove();
+                        if (fullText) bubble.innerHTML = renderMarkdown(fullText);
+                        bubble.classList.remove("streaming");
+                        _closeAgentCollapse();
+                        const made = _appendHostBubble();
+                        bubble = made.bubble;
+                        cursor = made.cursor;
+                        fullText = "";
+                        reasoningText = "";
+                        isReasoning = false;
+                    }
+                    if (parsed.close) {
+                        window.close();
+                        return;
+                    }
+                    if (parsed.reconcile_error) {
+                        if (!fullText) { const m = bubble.closest(".message"); if (m) m.remove(); }
+                    }
                     if (parsed.chunk) { removeImageLoading(bubble); fullText += parsed.chunk; rerender(); }
                     if (parsed.search_status) { searchStatusText = parsed.search_status; rerender(); }
                     if (parsed.sources) searchSources = parsed.sources;
@@ -2786,8 +2958,22 @@ function addAiBubble() {
     div.appendChild(avatar);
     div.appendChild(bubble);
     chatArea.appendChild(div);
+    _setHostMessage(div);
     chatArea.scrollTop = chatArea.scrollHeight;
-    return { bubble, cursor };
+    return { bubble, cursor, message: div };
+}
+
+function _appendHostBubble() {
+    const host = _resolveHostMessage();
+    if (!host) return addAiBubble();
+    const bubble = document.createElement("div");
+    bubble.className = "bubble streaming reconcile-bubble";
+    const cursor = document.createElement("span");
+    cursor.className = "typing-cursor";
+    bubble.appendChild(cursor);
+    host.appendChild(bubble);
+    chatArea.scrollTop = chatArea.scrollHeight;
+    return { bubble, cursor, message: host };
 }
 
 
@@ -3527,6 +3713,7 @@ async function sendMessage(presetText, opts) {
     if (!isAskAnswer) {
         addMessage("user", text, images, docs, convUserCount);
     }
+    _closeAgentCollapse();
     convUserCount++;
     let renderPending = false;
     let streamEnded = false;
@@ -3565,7 +3752,7 @@ async function sendMessage(presetText, opts) {
             if (wasAtBottom) chatArea.scrollTop = chatArea.scrollHeight;
         });
     }
-    const { bubble, cursor } = addAiBubble();
+    let { bubble, cursor } = addAiBubble();
     let fullText = "";
     let reasoningText = "";
     let isReasoning = false;
@@ -3704,6 +3891,31 @@ async function sendMessage(presetText, opts) {
                     if (parsed.reasoning_end) {
                         isReasoning = false;
                         scheduleRender();
+                    }
+                    if (parsed.reconcile_start) {
+                        if (cursor.parentNode) cursor.remove();
+                        if (fullText) {
+                            bubble.innerHTML = renderMarkdown(fullText);
+                        }
+                        bubble.classList.remove("streaming");
+                        _closeAgentCollapse();
+                        const made = _appendHostBubble();
+                        bubble = made.bubble;
+                        cursor = made.cursor;
+                        fullText = "";
+                        reasoningText = "";
+                        isReasoning = false;
+                        if (shouldAutoScroll()) chatArea.scrollTop = chatArea.scrollHeight;
+                    }
+                    if (parsed.close) {
+                        window.close();
+                        return;
+                    }
+                    if (parsed.reconcile_error) {
+                        if (!fullText) {
+                            const m = bubble.closest(".message");
+                            if (m) m.remove();
+                        }
                     }
                     if (parsed.chunk) {
                         removeImageLoading(bubble);
@@ -4308,7 +4520,8 @@ function _startAgentStream(slug, name, isImage) {
     div.appendChild(avatar);
     div.appendChild(bubble);
     div.appendChild(label);
-    chatArea.appendChild(div);
+    if (_isBlackbox()) { _collapseBody().appendChild(div); _bumpCollapseCount(); }
+    else { chatArea.appendChild(div); }
     _activeAgentStreams[slug] = { div, bubble, cursor: isImage ? null : bubble.querySelector(".cursor"), text: "", slug, name, isImage };
 }
 
@@ -4366,7 +4579,8 @@ function addAgentCallMessage(slug, name, content) {
     label.textContent = "via " + displayName;
     div.appendChild(bubble);
     div.appendChild(label);
-    chatArea.appendChild(div);
+    if (_isBlackbox()) { _collapseBody().appendChild(div); _bumpCollapseCount(); }
+    else { chatArea.appendChild(div); }
 }
 
 function renderCallBlocks(text) {
@@ -4436,6 +4650,23 @@ function _syncAllAiAvatars() {
         }
     });
 }
+
+// ==================== 关闭信号监听 ====================
+(function setupShutdownWatcher() {
+    try {
+        const es = new EventSource("/__shutdown__");
+        es.onmessage = function (ev) {
+            try {
+                const data = JSON.parse(ev.data || "{}");
+                if (data && data.close) {
+                    es.close();
+                    window.open("", "_self");
+                    window.close();
+                }
+            } catch (e) {}
+        };
+    } catch (e) {}
+})();
 
 // ==================== 初始化 ====================
 loadConversations();

@@ -34,6 +34,8 @@ UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", 
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "svg"}
 # =============================================================
 
+_SHUTDOWN_EVENT = threading.Event()
+
 PROVIDER_MODELS = {
     "deepseek": {
         "name": "DeepSeek",
@@ -147,6 +149,7 @@ def _default_config():
         "api_key": "",
         "api_keys": {},
         "model": "",
+        "model_id": "",
         "provider": "deepseek",
         "max_history_rounds": MAX_HISTORY_ROUNDS,
         "max_context_size_kb": 0,
@@ -168,7 +171,7 @@ def _load_config():
         except Exception:
             pass
     cfg["api_keys"] = _load_api_keys()
-    cfg["api_key"] = cfg["api_keys"].get(cfg["provider"], "")
+    cfg["api_key"] = cfg["api_keys"].get(cfg.get("model_id", ""), "")
     return cfg
 
 
@@ -196,21 +199,32 @@ def _save_api_keys(keys):
             os.chmod(APIKEY_FILE, 0o600)
         except Exception:
             pass
-    except Exception:
-        pass
+    except Exception as e:
+        print("[persist] API Key 文件写入失败:", type(e).__name__)
 
 
-def _get_key_for(provider):
-    return runtime_config.get("api_keys", {}).get(provider, "")
+def _get_key_for(model_id):
+    if not model_id:
+        return ""
+    return runtime_config.get("api_keys", {}).get(model_id, "")
 
 
-def _set_key_for(provider, key):
+def _set_key_for(model_id, key):
+    if not model_id:
+        return
     if "api_keys" not in runtime_config or not isinstance(runtime_config["api_keys"], dict):
         runtime_config["api_keys"] = {}
-    runtime_config["api_keys"][provider] = (key or "").strip()
+    runtime_config["api_keys"][model_id] = (key or "").strip()
     _save_api_keys(runtime_config["api_keys"])
-    if provider == runtime_config.get("provider"):
-        runtime_config["api_key"] = runtime_config["api_keys"][provider]
+
+
+def _del_key_for(model_id):
+    if not model_id:
+        return
+    keys = runtime_config.get("api_keys", {})
+    if isinstance(keys, dict) and model_id in keys:
+        del keys[model_id]
+        _save_api_keys(keys)
 
 
 def _save_config(cfg):
@@ -219,11 +233,7 @@ def _save_config(cfg):
         if k in ("api_key", "api_keys"):
             continue
         save_data[k] = v
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(save_data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    _atomic_save_json(CONFIG_FILE, save_data)
 
 
 def _make_default_project_agent():
@@ -257,11 +267,7 @@ def _load_projects():
 
 
 def _save_projects(projects):
-    try:
-        with open(PROJECTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(projects, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    _atomic_save_json(PROJECTS_FILE, projects)
 
 
 def _load_agents():
@@ -275,11 +281,7 @@ def _load_agents():
 
 
 def _save_agents(agents):
-    try:
-        with open(AGENTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(agents, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    _atomic_save_json(AGENTS_FILE, agents)
 
 
 def _load_conversations():
@@ -296,6 +298,19 @@ def _load_conversations():
 _save_lock = threading.Lock()
 _conv_locks = {}
 _conv_locks_guard = threading.Lock()
+
+
+def _atomic_save_json(path, data, indent=2):
+    try:
+        with _save_lock:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=indent)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+    except Exception as e:
+        print("[persist] 写入失败:", path, repr(e))
 
 # 后台生成注册表：cid -> {"events":[...], "cond":Condition, "done":bool, "cancel":Event}
 # 让 AI 生成脱离前端连接，切换对话/刷新页面都不会中断后台生成
@@ -413,16 +428,16 @@ def _conv_token_total(conv):
 
 def _save_conversations():
     try:
-        data = list(conversations.values())
         with _save_lock:
+            data = list(conversations.values())
             tmp = CONVERSATIONS_FILE + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, CONVERSATIONS_FILE)
-    except Exception:
-        pass
+    except Exception as e:
+        print("[persist] 写入失败: conversations", repr(e))
 
 
 def _allowed_file(filename):
@@ -499,15 +514,17 @@ def _get_chat_config(agent_id=None):
         p = PROVIDER_MODELS.get(provider)
         if not base_url and p:
             base_url = p["base_url"]
+        agent_mid = agent.get("model_id", "")
+        api_key = _get_key_for(agent_mid) if agent_mid else _get_key_for(runtime_config.get("model_id", ""))
         return {
             "base_url": base_url,
             "model": agent["model"],
-            "api_key": _get_key_for(provider)
+            "api_key": api_key
         }
     return {
         "base_url": runtime_config["base_url"],
         "model": runtime_config["model"],
-        "api_key": _get_key_for(runtime_config["provider"])
+        "api_key": _get_key_for(runtime_config.get("model_id", ""))
     }
 
 
@@ -524,6 +541,10 @@ def _build_callable_prompt(callable_agents):
     lines.append("\n【重要】当需要某个智能体协助时，你必须使用 [CALL:英文标识名] 具体任务描述 [/CALL] 格式来触发实际调用。")
     lines.append("⚠️ 绝对不要自己扮演或模拟被调用智能体的回复——系统会自动执行调用并将真实结果返回给你。")
     lines.append("如果你假装是被调用智能体在说话，用户将无法获得真实的子智能体能力。")
+    lines.append("【并行边界】你发起的多个调用是并行、互相独立执行的：被调用的子智能体彼此看不到对方，"
+                 "前一个子智能体的产出不会自动传给后一个。因此你只应在“彼此无先后依赖、可各自独立完成”的子任务上发起调用。"
+                 "如果任务存在“后一步必须基于前一步的产物”这种先后依赖（例如先出大纲再据此写正文），"
+                 "不要把它拆成并行调用——这种带先后顺序的流程应由工作流模式处理，你可以直接告知用户改用工作流。")
     return "\n".join(lines)
 
 
@@ -963,8 +984,10 @@ def _execute_agent_calls_stream(text, history, conv):
 
     return text
 
-def _new_conversation(agent_id=None, project_id=None):
+def _new_conversation(agent_id=None, project_id=None, mode=None):
     cid = str(uuid.uuid4())[:8]
+    if mode not in ("chat", "blackbox", "workflow"):
+        mode = "chat"
     if not _agent_belongs_to_scope(agent_id, project_id):
         agent_id = None
     if project_id and not agent_id:
@@ -979,6 +1002,7 @@ def _new_conversation(agent_id=None, project_id=None):
         "agent_id": agent_id,
         "project_id": project_id,
         "history": history,
+        "orchestration_mode": mode,
         "created": time.time(),
         "updated": time.time(),
         "pinned": False
@@ -996,6 +1020,26 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/__shutdown__", methods=["GET"])
+def shutdown_stream():
+    def generate():
+        while not _SHUTDOWN_EVENT.is_set():
+            yield "data: {}\n\n"
+            _SHUTDOWN_EVENT.wait(timeout=1)
+        yield 'data: {"close": true}\n\n'
+    return Response(stream_with_context(generate()), mimetype="text/event-stream; charset=utf-8")
+
+
+@app.route("/__shutdown__", methods=["POST"])
+def shutdown_trigger():
+    _SHUTDOWN_EVENT.set()
+    def _later():
+        time.sleep(1.5)
+        os._exit(0)
+    threading.Thread(target=_later, daemon=True).start()
+    return jsonify({"status": "ok"})
+
+
 @app.route("/api/providers", methods=["GET"])
 def get_providers():
     result = {}
@@ -1006,8 +1050,8 @@ def get_providers():
 
 @app.route("/api/provider-key-status", methods=["GET"])
 def provider_key_status():
-    provider = request.args.get("provider", "").strip()
-    return jsonify({"has_api_key": bool(_get_key_for(provider)) if provider else False})
+    mid = request.args.get("id", "").strip()
+    return jsonify({"has_api_key": bool(_get_key_for(mid)) if mid else False})
 
 
 @app.route("/api/settings", methods=["GET"])
@@ -1016,7 +1060,7 @@ def get_settings():
         "provider": runtime_config["provider"],
         "base_url": runtime_config["base_url"],
         "model": runtime_config["model"],
-        "has_api_key": bool(_get_key_for(runtime_config["provider"])),
+        "has_api_key": bool(_get_key_for(runtime_config.get("model_id", ""))),
         "max_history_rounds": runtime_config["max_history_rounds"],
         "max_context_size_kb": runtime_config.get("max_context_size_kb", 0),
         "auto_compress": runtime_config.get("auto_compress", False),
@@ -1059,8 +1103,9 @@ def update_settings():
         except (ValueError, TypeError):
             pass
     if "api_key" in data and data["api_key"]:
-        target_provider = data.get("provider") or runtime_config["provider"]
-        _set_key_for(target_provider, data["api_key"])
+        target_mid = (data.get("id") or runtime_config.get("model_id") or "").strip()
+        if target_mid:
+            _set_key_for(target_mid, data["api_key"])
     _save_config(runtime_config)
     return jsonify({"status": "ok"})
 
@@ -1071,10 +1116,24 @@ def switch_model():
     provider = data.get("provider", "")
     model = data.get("model", "")
     base_url = data.get("base_url", "")
+    model_id = data.get("id", "")
+    if model_id and not (provider and model):
+        for m in runtime_config.get("custom_models", []):
+            if m.get("id") == model_id:
+                provider = m.get("provider", "")
+                model = m.get("model", "")
+                base_url = m.get("base_url", "") or base_url
+                break
+    if not model_id and provider and model:
+        for m in runtime_config.get("custom_models", []):
+            if m.get("provider") == provider and m.get("model") == model:
+                model_id = m.get("id", "")
+                break
     if provider and model:
         runtime_config["provider"] = provider
         runtime_config["model"] = model
-        runtime_config["api_key"] = _get_key_for(provider)
+        runtime_config["model_id"] = model_id
+        runtime_config["api_key"] = _get_key_for(model_id)
         if base_url:
             runtime_config["base_url"] = base_url
         else:
@@ -1116,30 +1175,40 @@ def add_custom_model():
     for m in models:
         if m["provider"] == provider and m["model"] == model:
             return jsonify({"error": "该模型已存在"}), 409
-    entry = {"provider": provider, "model": model, "base_url": base_url, "name": name}
+    entry = {"id": str(uuid.uuid4())[:8], "provider": provider, "model": model, "base_url": base_url, "name": name}
     models.append(entry)
     runtime_config["custom_models"] = models
     _save_config(runtime_config)
     api_key = (data.get("api_key") or "").strip()
     if api_key:
-        _set_key_for(provider, api_key)
+        _set_key_for(entry["id"], api_key)
     return jsonify(entry), 201
 
 
 @app.route("/api/custom-models", methods=["DELETE"])
 def remove_custom_model():
     data = request.get_json()
+    mid = (data.get("id") or "").strip()
     provider = data.get("provider", "")
     model = data.get("model", "")
     models = runtime_config.get("custom_models", [])
-    runtime_config["custom_models"] = [m for m in models if not (m["provider"] == provider and m["model"] == model)]
+    removed_ids = []
+    if mid:
+        removed_ids = [m.get("id") for m in models if m.get("id") == mid]
+        runtime_config["custom_models"] = [m for m in models if m.get("id") != mid]
+    else:
+        removed_ids = [m.get("id") for m in models if m.get("provider") == provider and m.get("model") == model]
+        runtime_config["custom_models"] = [m for m in models if not (m.get("provider") == provider and m.get("model") == model)]
     _save_config(runtime_config)
+    for rid in removed_ids:
+        _del_key_for(rid)
     return jsonify({"status": "ok"})
 
 
 @app.route("/api/custom-models", methods=["PUT"])
 def update_custom_model():
     data = request.get_json()
+    mid = (data.get("id") or "").strip()
     old_provider = data.get("old_provider", "").strip()
     old_model = data.get("old_model", "").strip()
     new_provider = data.get("provider", "").strip()
@@ -1150,18 +1219,23 @@ def update_custom_model():
         return jsonify({"error": "模型名称不能为空"}), 400
     models = runtime_config.get("custom_models", [])
     found = False
+    hit_id = ""
     for m in models:
-        if m["provider"] == old_provider and m["model"] == old_model:
+        if (mid and m.get("id") == mid) or (not mid and m.get("provider") == old_provider and m.get("model") == old_model):
             m["provider"] = new_provider
             m["model"] = new_model
             m["base_url"] = new_base_url
             m["name"] = new_name
+            hit_id = m.get("id", "")
             found = True
             break
     if not found:
         return jsonify({"error": "未找到原模型"}), 404
     runtime_config["custom_models"] = models
     _save_config(runtime_config)
+    new_key = (data.get("api_key") or "").strip()
+    if new_key and hit_id:
+        _set_key_for(hit_id, new_key)
     return jsonify({"status": "ok"})
 
 
@@ -1172,17 +1246,20 @@ def reorder_custom_models():
     if not isinstance(order, list):
         return jsonify({"error": "order 必须是列表"}), 400
     models = runtime_config.get("custom_models", [])
-    index_map = {(m["provider"] + "|" + m["model"]): m for m in models}
-    reordered = []
-    for key in order:
-        m = index_map.pop(key, None)
-        if m is not None:
-            reordered.append(m)
+    index_map = {}
     for m in models:
-        k = m["provider"] + "|" + m["model"]
-        if k in index_map:
-            reordered.append(m)
-            index_map.pop(k, None)
+        if m.get("id"):
+            index_map[m["id"]] = m
+        index_map[m.get("provider", "") + "|" + m.get("model", "")] = m
+    reordered = []
+    seen = set()
+    for key in order:
+        m = index_map.get(key)
+        if m is not None and id(m) not in seen:
+            reordered.append(m); seen.add(id(m))
+    for m in models:
+        if id(m) not in seen:
+            reordered.append(m); seen.add(id(m))
     runtime_config["custom_models"] = reordered
     _save_config(runtime_config)
     return jsonify({"status": "ok"})
@@ -1209,9 +1286,11 @@ def create_agent():
         "model": data.get("model", ""),
         "provider": data.get("provider", ""),
         "base_url": data.get("base_url", ""),
+        "model_id": data.get("model_id", ""),
         "callable": data.get("callable", False),
         "slug": data.get("slug", ""),
         "when_to_call": data.get("when_to_call", ""),
+        "can_call": data.get("can_call", []),
         "created": time.time()
     }
     agents_list.append(agent)
@@ -1243,6 +1322,10 @@ def update_agent(agent_id):
         agent["slug"] = data["slug"]
     if "when_to_call" in data:
         agent["when_to_call"] = data["when_to_call"]
+    if "model_id" in data:
+        agent["model_id"] = data["model_id"]
+    if "can_call" in data:
+        agent["can_call"] = data["can_call"]
     _save_agents(agents_list)
     return jsonify(agent)
 
@@ -1251,6 +1334,10 @@ def update_agent(agent_id):
 def delete_agent(agent_id):
     global agents_list
     agents_list = [a for a in agents_list if a["id"] != agent_id]
+    for a in agents_list:
+        cc = a.get("can_call")
+        if isinstance(cc, list) and agent_id in cc:
+            a["can_call"] = [x for x in cc if x != agent_id]
     _save_agents(agents_list)
     return jsonify({"status": "ok"})
 
@@ -1651,6 +1738,7 @@ def list_conversations():
         result.append({"id": c["id"], "title": c["title"],
                        "agent_id": c.get("agent_id"), "project_id": c.get("project_id"),
                        "pinned": bool(c.get("pinned")),
+                       "orchestration_mode": c.get("orchestration_mode") or "chat",
                        "updated": c.get("updated") or c.get("created") or 0})
     return jsonify(result)
 
@@ -1660,9 +1748,10 @@ def create_conversation():
     data = request.get_json() if request.is_json else {}
     agent_id = data.get("agent_id", current_agent_id)
     project_id = data.get("project_id")
-    cid = _new_conversation(agent_id, project_id)
+    mode = data.get("orchestration_mode")
+    cid = _new_conversation(agent_id, project_id, mode)
     conv = conversations[cid]
-    return jsonify({"id": conv["id"], "title": conv["title"], "agent_id": conv.get("agent_id"), "project_id": conv.get("project_id"), "pinned": bool(conv.get("pinned"))})
+    return jsonify({"id": conv["id"], "title": conv["title"], "agent_id": conv.get("agent_id"), "project_id": conv.get("project_id"), "pinned": bool(conv.get("pinned")), "orchestration_mode": conv.get("orchestration_mode")})
 
 
 @app.route("/api/conversations/<cid>", methods=["DELETE"])
@@ -1790,13 +1879,19 @@ def update_conversation_agent(cid):
     new_agent_id = data.get("agent_id", None)
     if not _agent_belongs_to_scope(new_agent_id, conv.get("project_id")):
         return jsonify({"error": "该智能体不属于当前对话所在的项目"}), 400
-    conv["agent_id"] = new_agent_id
-    conv["history"] = [m for m in conv["history"] if m["role"] != "system"]
-    system_content = _get_system_content(new_agent_id, conv.get("project_id"))
-    if system_content:
-        conv["history"].insert(0, {"role": "system", "content": system_content})
-    _save_conversations()
-    return jsonify({"status": "ok", "agent_id": new_agent_id})
+    lock = _get_conv_lock(cid)
+    if not lock.acquire(blocking=False):
+        return jsonify({"error": "当前对话正在生成回复，请等待完成后再操作", "busy": True}), 409
+    try:
+        conv["agent_id"] = new_agent_id
+        conv["history"] = [m for m in conv["history"] if m["role"] != "system"]
+        system_content = _get_system_content(new_agent_id, conv.get("project_id"))
+        if system_content:
+            conv["history"].insert(0, {"role": "system", "content": system_content})
+        _save_conversations()
+        return jsonify({"status": "ok", "agent_id": new_agent_id})
+    finally:
+        lock.release()
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -1866,8 +1961,13 @@ def chat():
         title_text = user_input if user_input else ("[图片]" if images else "新对话")
         conv["title"] = title_text[:30]
 
-    callable_agents = _get_callable_agents()
-    callable_prompt = _build_callable_prompt(callable_agents)
+    orchestration_mode = conv.get("orchestration_mode") or "chat"
+    if orchestration_mode == "chat":
+        callable_agents = []
+        callable_prompt = ""
+    else:
+        callable_agents = _get_callable_agents()
+        callable_prompt = _build_callable_prompt(callable_agents)
 
     def _build_request_history():
         date_note = ("\n\n【当前真实日期】今天是 " + web_search._current_date_str()
@@ -2192,7 +2292,53 @@ def chat():
                 replace_data = json.dumps({"replace": clean_text}, ensure_ascii=False)
                 yield f"data: {replace_data}\n\n"
                 history[-1]["content"] = clean_text
-                yield from _execute_agent_calls_stream(full_reply, history, conv)
+                if orchestration_mode == "chat":
+                    pass
+                elif orchestration_mode == "blackbox":
+                    _bb_before = len(history)
+                    yield from _execute_agent_calls_stream(full_reply, history, conv)
+                    _bb_results = []
+                    for _m in history[_bb_before:]:
+                        if _m.get("role") == "assistant" and _m.get("agent_call"):
+                            _ac = _m.get("agent_call") or {}
+                            _bb_results.append((_ac.get("name") or _ac.get("slug") or "子智能体", _msg_plain_text(_m)))
+                    if _bb_results and not stream_state["cancel"].is_set():
+                        yield "data: " + json.dumps({"reconcile_start": True}, ensure_ascii=False) + "\n\n"
+                        _bb_sys = ("你是主控智能体。下面会给你用户的问题以及若干子智能体的执行结果，"
+                                   "请你据此把各路结果忠实地整合成一份给用户的最终回答。\n"
+                                   "诚实原则（最重要）：各子智能体是并行、互相独立完成的，它们之间可能并不一致。"
+                                   "如果发现各结果之间存在矛盾、不衔接、或并非围绕同一对象/主题，你必须如实说明这一情况，"
+                                   "分别清楚地呈现各路结果；绝对禁止编造它们之间本不存在的关联，禁止假装它们是配套的、一致的。\n"
+                                   "格式要求：只输出最终回答内容本身；禁止复述本指令或任务说明；"
+                                   "禁止描述你的思考过程；禁止出现“我们被要求”“用户的问题是”“某某智能体说/输出了”之类的元叙述；"
+                                   "禁止解释你将要怎么做。直接开始正文。")
+                        _bb_parts = ["【用户的问题】", str(user_input or ""), "", "【各子智能体的执行结果】"]
+                        for _bn, _bc in _bb_results:
+                            _bb_parts.append("◆ " + _bn + "：\n" + (_bc or "（无内容）"))
+                        _bb_summary_req = [{"role": "system", "content": _bb_sys}, {"role": "user", "content": "\n".join(_bb_parts)}]
+                        _bb_text = ""
+                        try:
+                            _bb_resp = send_chat_request(chat_cfg["base_url"], chat_cfg["api_key"], _bb_summary_req, chat_cfg["model"])
+                            if _bb_resp.status_code == 200:
+                                for _bl in _bb_resp.iter_lines(decode_unicode=True):
+                                    if stream_state["cancel"].is_set():
+                                        break
+                                    _bc2 = parse_stream_chunk(_bl)
+                                    if _bc2 is None:
+                                        break
+                                    if _bc2:
+                                        _bb_text += _bc2
+                                        yield "data: " + json.dumps({"chunk": _bc2}, ensure_ascii=False) + "\n\n"
+                        except Exception:
+                            _bb_text = ""
+                        if _bb_text.strip():
+                            history.append({"role": "assistant", "content": _bb_text, "ts": int(time.time()), "agent_id": agent_id, "reconcile": True})
+                            stream_state["full_reply"] = _bb_text
+                            _save_conversations()
+                        else:
+                            yield "data: " + json.dumps({"reconcile_error": True}, ensure_ascii=False) + "\n\n"
+                else:
+                    yield from _execute_agent_calls_stream(full_reply, history, conv)
                 mgr._trim_history()
             else:
                 mgr._trim_history()
@@ -2498,6 +2644,8 @@ def import_conversations():
             "id": cid,
             "title": str(title)[:50] if title else "导入的对话",
             "agent_id": conv.get("agent_id"),
+            "project_id": conv.get("project_id"),
+            "orchestration_mode": conv.get("orchestration_mode") or "chat",
             "pinned": bool(conv.get("pinned")),
             "created": conv.get("created", time.time()),
             "updated": conv.get("updated") or conv.get("created") or time.time(),

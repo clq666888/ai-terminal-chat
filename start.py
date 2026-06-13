@@ -292,7 +292,18 @@ def do_start():
     return 1
 
 
+def _notify_shutdown():
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{URL}/__shutdown__", method="POST")
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
+
+
 def do_stop():
+    _notify_shutdown()
+    time.sleep(1)
     pid = is_running()
     if not pid:
         _print("ℹ️  PolyAI Chat 未在运行")

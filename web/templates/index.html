@@ -136,6 +136,13 @@
                         </div>
                     </div>
                 </div>
+                <div class="mode-badge readonly" id="mode-toggle" title="本对话的编排模式（创建时锁定，不可修改）">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M3 12h6M15 12h6"></path>
+                    </svg>
+                    <span class="mode-toggle-label" id="mode-toggle-label">对话</span>
+                </div>
                 <div class="token-meter" id="token-meter" title="当前对话累计 token 消耗（基于 API 返回的 usage）">
                     该对话总计使用 <span id="token-meter-value">0</span> token
                 </div>
@@ -296,6 +303,10 @@
                     <label class="setting-label">模型</label>
                     <select id="add-model" class="setting-select"></select>
                     <input type="text" id="add-model-custom" class="setting-input" placeholder="自定义模型名称" style="display:none;margin-top:8px;">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">显示名称（可留空自动生成）</label>
+                    <input type="text" id="model-display-name" class="setting-input" placeholder="例如：官方 GPT-5.5 / 中转 GPT-5.5">
                 </div>
                 <div class="setting-group">
                     <label class="setting-label">API Key</label>
@@ -498,6 +509,11 @@
                             </div>
                         </div>
                     </div>
+                    <div class="setting-group agent-cancall-section">
+                        <label class="setting-label">可调用的下级智能体</label>
+                        <div class="input-hint" style="margin-bottom:8px;">勾选该智能体作为主控时允许调用的下级智能体；不勾选则可调用同范围内全部可被调用的智能体</div>
+                        <div id="agent-cancall-list" class="cancall-list"></div>
+                    </div>
                 </div>
             </div>
             <div class="agent-form-actions" id="agent-form-actions" style="display:none;">
@@ -526,6 +542,30 @@
             <div class="confirm-actions">
                 <button class="confirm-btn confirm-cancel" id="prompt-cancel">取消</button>
                 <button class="confirm-btn confirm-ok" id="prompt-ok">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="confirm-overlay" id="mode-pick-overlay">
+        <div class="confirm-dialog">
+            <h3 class="confirm-title">选择对话模式</h3>
+            <p class="confirm-message">模式创建后锁定，不可中途修改。</p>
+            <div class="mode-pick-list">
+                <button class="mode-pick-item" data-mode="chat">
+                    <span class="mode-pick-name">对话</span>
+                    <span class="mode-pick-desc">纯聊天，可调用智能体但不嵌套</span>
+                </button>
+                <button class="mode-pick-item" data-mode="blackbox">
+                    <span class="mode-pick-name">黑盒</span>
+                    <span class="mode-pick-desc">一主多从，子智能体过程折叠可展开</span>
+                </button>
+                <button class="mode-pick-item" data-mode="workflow">
+                    <span class="mode-pick-name">工作流</span>
+                    <span class="mode-pick-desc">子智能体过程全部可见</span>
+                </button>
+            </div>
+            <div class="confirm-actions">
+                <button class="confirm-btn confirm-cancel" id="mode-pick-cancel">取消</button>
             </div>
         </div>
     </div>

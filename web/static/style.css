@@ -3776,7 +3776,6 @@ body.resizing .sidebar {
     display: flex;
     align-items: center;
     gap: 4px;
-    margin-left: auto;
     font-size: 12px;
     color: var(--text-secondary);
     white-space: nowrap;
@@ -3953,4 +3952,186 @@ body.resizing .sidebar {
 
 #kb-create-overlay {
     z-index: 300;
+}
+
+/* 可调用的下级智能体（白名单多选） */
+.agent-cancall-section {
+    margin-top: 16px;
+}
+.cancall-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 200px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+    background: var(--bg-input);
+}
+.cancall-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-primary);
+    transition: background 0.15s;
+}
+.cancall-item:hover {
+    background: var(--bg-hover);
+}
+.cancall-item input[type=checkbox] {
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+.cancall-item-name {
+    font-size: 13px;
+}
+
+/* ===== 阶段3：编排模式开关 + 黑盒折叠 ===== */
+.mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 10px;
+    margin-left: auto;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+.mode-toggle:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+.mode-toggle.blackbox {
+    background: var(--bg-active);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.mode-toggle .mode-toggle-label {
+    line-height: 1;
+}
+
+.message.ai .agent-collapse,
+.message.ai .reconcile-bubble {
+    flex-basis: 100%;
+    margin-left: 44px;
+}
+.agent-collapse {
+    margin: 8px 0 0 44px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-chat);
+    overflow: hidden;
+}
+.message.ai .reconcile-bubble {
+    margin-top: 8px;
+}
+.agent-collapse-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 13px;
+    list-style: none;
+    user-select: none;
+}
+.agent-collapse-summary::-webkit-details-marker { display: none; }
+.agent-collapse-summary:hover { color: var(--text-primary); }
+.agent-collapse-summary .ac-icon {
+    transition: transform 0.15s ease;
+    flex-shrink: 0;
+}
+.agent-collapse[open] > .agent-collapse-summary .ac-icon {
+    transform: rotate(90deg);
+}
+.agent-collapse-summary .ac-text { flex: 1; }
+.agent-collapse-summary .ac-count {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--bg-active);
+    color: var(--accent);
+    font-size: 11px;
+    line-height: 18px;
+    text-align: center;
+}
+.agent-collapse-body {
+    padding: 4px 12px 10px;
+    border-top: 1px solid var(--border);
+}
+.agent-collapse-body .message.agent-call {
+    margin-left: 0;
+}
+
+.mode-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 28px;
+    padding: 0 10px;
+    margin-left: auto;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    font-size: 12px;
+    white-space: nowrap;
+}
+.mode-badge.readonly { cursor: default; }
+.mode-badge.blackbox {
+    background: var(--bg-active);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.mode-badge.workflow {
+    background: var(--bg-active);
+    color: var(--text-primary);
+    border-color: var(--border);
+}
+.mode-badge .mode-toggle-label { line-height: 1; }
+
+.mode-pick-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 4px 0 20px;
+}
+.mode-pick-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-input);
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s ease;
+}
+.mode-pick-item:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+}
+.mode-pick-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+.mode-pick-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
 }
